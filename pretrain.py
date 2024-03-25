@@ -3,6 +3,8 @@ import os
 os.chdir(os.path.dirname(__file__))
 from data.loader import generate_cube_data
 
+from torch.utils.data import TensorDataset, DataLoader
+
 # def parse_args():
 #     parser = argparse.ArgumentParser()
 #     parser.add_argument("task", help="specifies synthetic data generating process, one of 'cube_single', ")
@@ -15,11 +17,19 @@ from data.loader import generate_cube_data
 #     args = parser.parse_args()
 #     return args
 
-
+# ideally: just provide args for model, then train
 def main():
-    (x1, x2, y), (val_x, val_y) = generate_cube_data()
+    (x1, x2, _), (val_x, val_y) = generate_cube_data()
+    epochs = 100
 
-    # TODO: Train loop here
+    # create dataloader ?
+    trainset, valset = TensorDataset(x1, x2), TensorDataset(val_x, val_y)
+    trainloader = DataLoader(trainset, batch_size=32)
+    valloader = DataLoader(valset, batch_size=32)
+
+    model = None
+    model.train_model()
+
 
 
     pass
