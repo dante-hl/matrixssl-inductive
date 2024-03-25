@@ -31,7 +31,6 @@ class projection_identity(nn.Module):
 class Spectral(nn.Module):
     def __init__(self, backbone=resnet50(), mu=1.0):
         super().__init__()
-
         self.mu = mu
         self.backbone = backbone
         self.projector = projection_identity()
