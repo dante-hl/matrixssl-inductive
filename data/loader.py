@@ -38,8 +38,9 @@ def generate_cube_data(n: int = 50000, v: int = 12500, d: int = 50, k: int = 10,
         true_w[:k] = torch.randn(k)
     # print(f"weights: {true_w}")
 
-    y = torch.sign(train_x @ true_w)
-    val_y = torch.sign(val_x @ true_w)
+    # change from {-1, 1} to {0, 1} labels - for linear classification loss
+    y = (torch.sign(train_x @ true_w) + 1)/2
+    val_y = (torch.sign(val_x @ true_w) + 1)/2
 
     return (x1, x2, y), (val_x, val_y)
 
