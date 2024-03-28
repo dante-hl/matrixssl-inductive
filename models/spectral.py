@@ -1,10 +1,11 @@
+#  %%
 import torch
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import resnet50
 
-
+# %%
 def D(z1, z2, mu=1.0):
     mask1 = (torch.norm(z1, p=2, dim=1) < np.sqrt(mu)).float().unsqueeze(1)
     mask2 = (torch.norm(z2, p=2, dim=1) < np.sqrt(mu)).float().unsqueeze(1)
@@ -27,13 +28,21 @@ class projection_identity(nn.Module):
     def forward(self, x):
         return x
 
-
+# possible backbones for input of dim=50 (include this in the mssl file too:)
+# Linear: nn.Linear(50, 20)
+# MLP: nn.Sequential(nn.Linear(50, 100), nn.ReLU(inplace=True), nn.Linear(100, 20)))
 class Spectral(nn.Module):
-    def __init__(self, backbone=resnet50(), mu=1.0):
+    def __init__(self, backbone, emb_dim, mu=1.0):
+        """
+        backbone: encoder/embedding function
+        emb_dim, embedding dimension
+        mu: TODO look into this
+        """
         super().__init__()
         self.mu = mu
         self.backbone = backbone
         self.projector = projection_identity()
+        self.emb_dim = emb_dim
 
         self.encoder = nn.Sequential(  # f encoder
             self.backbone,
@@ -45,3 +54,39 @@ class Spectral(nn.Module):
         z1, z2 = f(x1), f(x2)
         L, d_dict = D(z1, z2, mu=self.mu)
         return {'loss': L, 'd_dict': d_dict}  # unsure why they returned it this way...
+
+    def train_model(self, trainloader, valloader, optim, epochs, lr_sched, momentum_sched, lambda_sched):
+        train_iters = len(trainloader)
+        val_iters = len(valloader)
+        train_loss = []
+        classif_acc = []
+
+        for epoch in range(epochs):
+            self.train()
+            
+            # train loop
+            for idx, (x1, x2) in enumerate(trainloader):
+                # zero out gradients
+                optim.zero_grad()
+                # send data through model, get loss from model
+                out_dict = self(x1, x2)
+                loss = out_dict['loss']
+                # backprop
+                loss.backward()
+                # update weights
+                optim.step()
+
+            # evaluate downstream lin classif performance at end of each epoch
+            self.eval()
+            # stop calculating gradients for encoder
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+            # instantiate linear classifier
+            self.linear = nn.Linear(self.emb_dim, 1)
+            # fit linear classifier, print classification accuracy on validation set
+            self.fit_classifier(self.linear,
+                                valloader,
+                                self.emb_dim,
+                                nn.BCELoss(),
+                                optim.SGD(self.linear.parameters(), lr=0.1, momentum=0.9))
+

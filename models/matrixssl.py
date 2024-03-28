@@ -101,8 +101,11 @@ def symmetrized_mssl_loss(p1: torch.tensor, p2: torch.tensor, z1: torch.tensor, 
 
 
 class MatrixSSL(nn.module):
-    def __init__(self, backbone, gamma: float = 1.0, assym=True):
+    def __init__(self, backbone, emb_dim, gamma: float = 1.0, assym=True):
         """
+        backbone: encoder/embedding function
+        emb_dim: embedding dimension 
+        gamma: TODO figure this out
         assym: whether we use assymetric siamese (online-target) networks, with momentum averaging for the target network
         """
         super().__init__()
@@ -110,18 +113,18 @@ class MatrixSSL(nn.module):
 
         self.gamma = gamma
         self.backbone = backbone
-        out_dim = self.backbone.#{property}
+        self.emb_dim = emb_dim
         if assym:
-            self.projector = nn.Sequential(nn.Linear(out_dim, out_dim, bias=False),
-                                           nn.BatchNorm1d(out_dim),
+            self.projector = nn.Sequential(nn.Linear(emb_dim, emb_dim, bias=False),
+                                           nn.BatchNorm1d(emb_dim),
                                            nn.ReLU(inplace=True), # first layer
-                                           nn.Linear(out_dim, out_dim, bias=False),
-                                           nn.BatchNorm1d(out_dim),
+                                           nn.Linear(emb_dim, emb_dim, bias=False),
+                                           nn.BatchNorm1d(emb_dim),
                                            nn.ReLU(inplace=True), # second layer
                                         #    self.encoder.fc,
-                                           nn.BatchNorm1d(dim, affine=False)
-                                          ) # FILL
-            self.predictor = nn.Sequential() # FILL
+                                           nn.BatchNorm1d(emb_dim, affine=False) 
+                                          ) # TODO figure if BatchNorm1d needed
+            self.predictor = nn.Sequential() # TODO FILL
             self.online = nn.Sequential(self.backbone, self.projector, self.predictor)
             self.target = nn.Sequential(self.backbone, self.projector)
         else:
@@ -129,16 +132,18 @@ class MatrixSSL(nn.module):
 
     def forward(self, x1, x2):
         if self.assym:
-            p1, z2 = self.target(x1), self.online(x2)
-            p2, z1 = self.target(x2), self.online(x1)
+            z1, z2 = self.online(x1), self.online(x2)
+            with torch.no_grad():
+                p1, p2 = self.target(x1), self.target(x2)
             loss, d_dict = symmetrized_mssl_loss(p1,p2,z1,z2)
             return loss, d_dict
         else: # worry about this later..
-            f = self.encoder
-            z1 = f(x1)
-            # z1, z2 = f(x1), f(x2)
-            loss, d_dict = mssl_loss(z1, z2)
-            return loss, d_dict
+            # f = self.encoder
+            # z1 = f(x1)
+            # # z1, z2 = f(x1), f(x2)
+            # loss, d_dict = mssl_loss(z1, z2)
+            # return loss, d_dict
+            pass
     
     def train_model(self, trainloader, valloader, optim, epochs, lr_sched, momentum_sched, lambda_sched):
         train_iters = len(trainloader)
@@ -153,11 +158,11 @@ class MatrixSSL(nn.module):
             # TODO: change this to match mssl...
             if self.assym:
                 for idx, (x1, x2) in enumerate(trainloader):
+                    # zero out gradients
                     optim.zero_grad()
                     
             else:
                 for idx, (x1, x2) in enumerate(trainloader):
-                    # zero out gradients
                     optim.zero_grad()
                     # send data through model, get loss from model
                     out_dict = self(x1, x2)
@@ -171,35 +176,4 @@ class MatrixSSL(nn.module):
             # evaluate downstream lin classif performance at end of each epoch
             self.eval()
             self.fit_classifier(valloader, )
-            
-
-    def fit_classifier(self, valloader, clf_loss_fn, clf_optim, clf_epochs):
-        """
-        Fits linear classifier on representations learned so far using validation dataset, outputs classification accuracy of classifier after fitting. Returns classification accuracy on validation set
-        """
-        lin_clf = nn.Linear(20, 1)
-
-        # for efficiency (see later), only iterating over dataset once (may have to change...)
-        for idx, (x, y) in enumerate(valloader):
-            # zero gradients
-            clf_optim.zero_grad()
-            # get linear classif predictor
-            pred = lin_clf(self.backbone(x))
-            # calculate loss on labels, backprop
-            #  TODO: use 01 surrogate loss, like hinge (because differentiable)
-            ###################
-            clf_loss = clf_loss_fn(pred, y)
-            clf_loss.backward()
-            # update weights
-            clf_optim.step()
-        
-        with torch.no_grad():
-            total_count = 0
-            correct_count = 0
-            for idx, (x, y) in enumerate(valloader):
-                pred = torch.sign(lin_clf(self.backbone(x)))
-                correct_count += torch.sum(pred == y)
-                total_count += len(y)
-            clf_acc = correct_count / total_count
-        return clf_acc
 
