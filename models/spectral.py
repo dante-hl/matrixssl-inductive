@@ -53,40 +53,5 @@ class Spectral(nn.Module):
         f = self.encoder
         z1, z2 = f(x1), f(x2)
         L, d_dict = D(z1, z2, mu=self.mu)
-        return {'loss': L, 'd_dict': d_dict}  # unsure why they returned it this way...
-
-    def train_model(self, trainloader, valloader, optim, epochs, lr_sched, momentum_sched, lambda_sched):
-        train_iters = len(trainloader)
-        val_iters = len(valloader)
-        train_loss = []
-        classif_acc = []
-
-        for epoch in range(epochs):
-            self.train()
-            
-            # train loop
-            for idx, (x1, x2) in enumerate(trainloader):
-                # zero out gradients
-                optim.zero_grad()
-                # send data through model, get loss from model
-                out_dict = self(x1, x2)
-                loss = out_dict['loss']
-                # backprop
-                loss.backward()
-                # update weights
-                optim.step()
-
-            # evaluate downstream lin classif performance at end of each epoch
-            self.eval()
-            # stop calculating gradients for encoder
-            for param in self.encoder.parameters():
-                param.requires_grad = False
-            # instantiate linear classifier
-            self.linear = nn.Linear(self.emb_dim, 1)
-            # fit linear classifier, print classification accuracy on validation set
-            self.fit_classifier(self.linear,
-                                valloader,
-                                self.emb_dim,
-                                nn.BCELoss(),
-                                optim.SGD(self.linear.parameters(), lr=0.1, momentum=0.9))
+        return {'loss': L, 'd_dict': d_dict}
 

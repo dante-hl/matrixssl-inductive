@@ -136,7 +136,7 @@ class MatrixSSL(nn.module):
             with torch.no_grad():
                 p1, p2 = self.target(x1), self.target(x2)
             loss, d_dict = symmetrized_mssl_loss(p1,p2,z1,z2)
-            return loss, d_dict
+            return {'loss': loss, 'd_dict': d_dict}
         else: # worry about this later..
             # f = self.encoder
             # z1 = f(x1)
@@ -144,36 +144,4 @@ class MatrixSSL(nn.module):
             # loss, d_dict = mssl_loss(z1, z2)
             # return loss, d_dict
             pass
-    
-    def train_model(self, trainloader, valloader, optim, epochs, lr_sched, momentum_sched, lambda_sched):
-        train_iters = len(trainloader)
-        val_iters = len(valloader)
-        train_loss = []
-        classif_acc = []
-
-        for epoch in range(epochs):
-            self.train()
-            
-            # train loop
-            # TODO: change this to match mssl...
-            if self.assym:
-                for idx, (x1, x2) in enumerate(trainloader):
-                    # zero out gradients
-                    optim.zero_grad()
-                    
-            else:
-                for idx, (x1, x2) in enumerate(trainloader):
-                    optim.zero_grad()
-                    # send data through model, get loss from model
-                    out_dict = self(x1, x2)
-                    loss = out_dict['loss']
-                    # running_loss += loss
-                    # backprop
-                    loss.backward()
-                    # update weights
-                    optim.step()
-
-            # evaluate downstream lin classif performance at end of each epoch
-            self.eval()
-            self.fit_classifier(valloader, )
 

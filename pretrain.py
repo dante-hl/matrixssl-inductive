@@ -65,6 +65,8 @@ def main():
     trainloader = DataLoader(trainset, batch_size=32)
     valloader = DataLoader(valset, batch_size=32)
 
+    # ssl_model refers to both the encoder and the SSL class used to train it
+    # the specific class of ssl_model is an SSL algorithm wrapper for the encoder
     ssl_model = None
     optim = None
     epochs = 100
@@ -82,7 +84,7 @@ def main():
             optim.zero_grad()
             # run forward() on ssl_model, which is expected to return a SSL loss on x1, x2
             # the forward function is specific to each SSL algorithm (Spectral, MatrixSSL, etc.)
-            loss = ssl_model(x1, x2)
+            loss = ssl_model(x1, x2)['loss']
             # backprop
             loss.backward()
             # update weights
@@ -93,7 +95,7 @@ def main():
         # stop calculating gradients for encoder
         for param in ssl_model.encoder.parameters():
             param.requires_grad = False
-            
+
         # instantiate linear classifier
         linear = nn.Linear(ssl_model.emb_dim, 1)
         # fit linear classifier, print classification accuracy on validation set
