@@ -87,19 +87,6 @@ def symmetrized_mssl_loss(p1: torch.tensor, p2: torch.tensor, z1: torch.tensor, 
     return u_loss + a_loss, {"uniformity": u_loss, "alignment": a_loss}
 
 
-
-# class MLP(nn.Module):
-#     def __init__(self, *dims):
-#         super().__init__()
-#         layer_names = ['linear{}'.format(i) for i in range(len(dims))]
-#         for name, dim in zip(layer_names, dims):
-#             setattr(self, name, dim)
-#         self.activation = nn.ReLU()
-
-#     def forward(self, x):
-#         return
-
-
 class MatrixSSL(nn.module):
     def __init__(self, backbone, emb_dim, gamma: float = 1.0, assym=True):
         """

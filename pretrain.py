@@ -1,23 +1,31 @@
 # set cwd set to matrixssl-inductive
+
 import os
 os.chdir(os.path.dirname(__file__))
 from data.loader import generate_cube_data
-
+# %%
+import argparse
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 
-# def parse_args():
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument("task", help="specifies synthetic data generating process, one of 'cube_single', ")
-#     parser.add_argument("backbone", help="architecture used, one of 'linear', ")
-#     parser.add_argument("-n", help="number of datum", type=int)
-#     parser.add_argument("-d", help="dimensionality of data", type=int)
-#     parser.add_argument("-k", help="number invariant dimensions", type=int)
-#     parser.add_argument("--split", help="specifies train-val split; input some number < n", type=int)
-#     # might need conditional arguments... ?
-#     args = parser.parse_args()
-#     return args
+from models.backbones import Spectral, MatrixSSL
+
+# %%
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    # TODO set defaults for n,d,k,v,weights (?)
+    parser.add_argument("--alg", type=str, help="SSL algorithm to train, one of {'spectral', 'mssl_a', 'mssl_s'}. mssl_a, mssl_s refer to MatrixSSL with assymetric (online, target) networks and a single network, respectively")
+    parser.add_argument("--backbone", type=str, help="architecture used, one of {'linear', 'mlp'}")
+    parser.add_argument("-n", type=int, default=50000, help="number of data points")
+    parser.add_argument("-v", type=int, default=12500, help="size of validation set, input some v<n")
+    parser.add_argument("-d", type=int, default=50, help="dimension of data")
+    parser.add_argument("-k", type=int, default=10, help="number invariant dimensions")
+    parser.add_argument("--weights", help="weight tensor, optional", nargs="*")
+
+    args = parser.parse_args()
+    return args
 
 
 def fit_classifier(linear, encoder, valloader, clf_loss_fn, clf_optim, clf_epochs=None):
@@ -58,16 +66,38 @@ def fit_classifier(linear, encoder, valloader, clf_loss_fn, clf_optim, clf_epoch
 
 # ideally: just provide args for model, then train
 def main():
-    (x1, x2, _), (val_x, val_y) = generate_cube_data()
-
+    args = parse_args()
+    
+    weights = torch.tensor(args.weights, dtype=torch.float32) if len(args.weights) > 0 else None
+    # generate data
+    (x1, x2, _), (val_x, val_y) = generate_cube_data(args.n, args.v, args.d, args.k, args.weights)
     # create dataloader
     trainset, valset = TensorDataset(x1, x2), TensorDataset(val_x, val_y)
     trainloader = DataLoader(trainset, batch_size=32)
     valloader = DataLoader(valset, batch_size=32)
 
+    # initialize encoder
+    if args.backbone == "linear":
+        backbone = nn.Linear(args.d, args.k)
+    elif args.backbone == "mlp":
+        backbone = nn.Sequential(
+            nn.Linear(args.d, 2*args.d),
+            nn.ReLU(inplace=True),
+            nn.Linear(2*args.d, args.k)
+            )
+    else:
+        raise Exception("Invalid argument 'backbone', must be one of {'linear', 'mlp'}")
+
     # ssl_model refers to both the encoder and the SSL class used to train it
     # the specific class of ssl_model is an SSL algorithm wrapper for the encoder
-    ssl_model = None
+    if args.alg == "spectral":
+        ssl_model = Spectral(backbone=backbone, emb_dim=args.k) # TODO
+    elif args.alg == "mssl_a":
+        ssl_model = MatrixSSL(backbone=backbone, emb_dim=args.k, assym=True)
+    elif args.alg == "mssl_s":
+        ssl_model = MatrixSSL(backbone=backbone, emb_dim=args.k, assym=False)
+    else:
+        raise Exception("Invalid argument 'alg', must be one of {'spectral', 'mssl_a', 'mssl_s'}")
     optim = None
     epochs = 100
 
@@ -108,12 +138,7 @@ def main():
             )
         print(f'Epoch {epoch+1} classification accuracy: {clf_acc}')
 
-
-
-
-
-
-    pass
+    # functions to save model..
 
 
 if __name__ == '__main__':
