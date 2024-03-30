@@ -42,6 +42,6 @@ def generate_cube_data(n: int = 50000, v: int = 12500, d: int = 50, k: int = 10,
     y = (torch.sign(train_x @ true_w) + 1)/2
     val_y = (torch.sign(val_x @ true_w) + 1)/2
 
-    return (x1, x2, y), (val_x, val_y)
+    return {"train":(x1, x2, y), "val":(val_x, val_y), "true_weights":true_w}
 
 # %%

@@ -36,7 +36,7 @@ class Spectral(nn.Module):
         """
         backbone: encoder/embedding function
         emb_dim, embedding dimension
-        mu: TODO look into this
+        mu: set to 1
         """
         super().__init__()
         self.mu = mu
