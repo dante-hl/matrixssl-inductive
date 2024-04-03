@@ -8,39 +8,54 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
 from torch.utils.data import TensorDataset, DataLoader
 
-from models.backbones import Spectral, MatrixSSL
+from models import Spectral, MatrixSSL
 
 # %%
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    # TODO set defaults for n,d,k,v,weights (?)
-    parser.add_argument("--alg", type=str, help="SSL algorithm to train, one of {'spectral', 'mssl_a', 'mssl_s'}. mssl_a, mssl_s refer to MatrixSSL with assymetric (online, target) networks and a single network, respectively")
-    parser.add_argument("--backbone", type=str, help="architecture used, one of {'linear', 'mlp'}")
+
+    # Algorithm, encoder, optimizer
+    parser.add_argument("--alg", type=str, required=True, 
+    help="SSL algorithm to train, one of {'spectral', 'mssl_a', 'mssl_s'}. mssl_a, mssl_s refer to MatrixSSL with asymmetric (online, target) networks and a single network, respectively")
+    parser.add_argument("--backbone", type=str, required=True, help="architecture used, one of {'linear', 'mlp'}")
+    parser.add_argument("--optim", type=str, required=True, help="optimizer, one of {'sgd', 'adam', 'adam_wd} adam_wd means adam with weight decay")
+
+    # Data generation arguments
     parser.add_argument("-n", type=int, default=50000, help="number of data points")
     parser.add_argument("-v", type=int, default=12500, help="size of validation set, input some v<n")
     parser.add_argument("-d", type=int, default=50, help="dimension of data")
     parser.add_argument("-k", type=int, default=10, help="number invariant dimensions")
-    parser.add_argument("--epochs", type=int, default=500, help="number training epochs")
-    parser.add_argument("--batch_size", type=int, default=512, help="size of training minibatch")
-    parser.add_argument("--optim", type=str, help="optimizer, one of {'sgd', 'adam', 'adam_wd} adam_wd means adam with weight decay")
     parser.add_argument("--weights", help="weight tensor for true classification function, optional", nargs="*")
+
+    # Other training arguments
+    parser.add_argument("--epochs", type=int, default=150, help="number training epochs")
+                        # TODO Change default here ^ back to 500 once done experimenting
+                        # TODO Change default here v back to 512... ?
+    parser.add_argument("--batch_size", type=int, default=32, help="size of training minibatch")
+
+    # Conditional arguments 
+    parser.add_argument("--momentum", type=float, help="momentum averaging parameter for MatrixSSL with asymmetric networks. required if alg set to mssl_a, must be in [0, 1]")
+    parser.add_argument("--hidden_dim", type=int, default=20, help="dimension of hidden layer in predictor network for MatrixSSL with assymetric networks. required if alg set to mssl_a")
+
+    # Saving/loading
     parser.add_argument("--save_dir", type=str, required=False, help="directory to save model weights/run details to")
 
     args = parser.parse_args()
     return args
 
 
-def fit_classifier(linear, encoder, valloader, clf_loss_fn, clf_optim, clf_epochs=None):
+def fit_classifier(linear, backbone, valloader, clf_loss_fn, clf_optim, clf_epochs=None):
     """
     Fits linear classifier on representations learned so far using validation dataset, outputs classification accuracy of classifier after fitting. Returns classification accuracy on validation set
 
-    Ensure encoder has requires_gradients=False (and encoder set to eval()) before running
+    Ensure backbone has requires_gradients=False (and backbone set to eval()) before running
 
     linear: the linear classifier to fit
-    encoder: encoder/embedding function
+    backbone: encoder/embedding function
     valloader: DataLoader for validation set to fit on
     clf_loss_fn: linear classification loss function
     clf_optim: optimizer for linear classifier
@@ -51,7 +66,7 @@ def fit_classifier(linear, encoder, valloader, clf_loss_fn, clf_optim, clf_epoch
         # zero gradients
         clf_optim.zero_grad()
         # get linear classif predictor
-        pred = torch.sigmoid(linear(encoder(x)))
+        pred = torch.sigmoid(linear(backbone(x))).flatten()
         # calculate loss on labels, backprop
         clf_loss = clf_loss_fn(pred, y)
         clf_loss.backward()
@@ -62,11 +77,25 @@ def fit_classifier(linear, encoder, valloader, clf_loss_fn, clf_optim, clf_epoch
         total_count = 0
         correct_count = 0
         for idx, (x, y) in enumerate(valloader):
-            pred = (torch.sigmoid(linear(encoder(x))) >= 0.5)
+            pred = (torch.sigmoid(linear(backbone(x))) >= 0.5).flatten()
             correct_count += torch.sum(pred == y)
             total_count += len(y)
         clf_acc = correct_count / total_count
     return clf_acc
+
+def generate_filepath(save_path:str, num):
+    """
+    Given save path, returns a compatible path name that doesn't override existing run log files
+
+    save_path: path to save file to, without "_run#" appended
+    returns: save_path with compatible "_run#" string appended
+    """
+    candidate_path = save_path + "_run" + str(num)
+    if os.path.isfile(candidate_path):
+        num += 1
+        return generate_filepath(save_path, num)
+    else:
+        return candidate_path
 
 
 # ideally: just provide args for model, then train
@@ -75,16 +104,18 @@ def main():
     
     if args.save_dir is not None:
         save_dir = args.save_dir if os.path.isdir(args.save_dir) else os.makdirs(args.save_dir)
-    else: # save to default
+    else: # save to default: outputs folder
         save_dir = './outputs'
-    filename = "_".join([f'{args.alg}', f'{args.backbone}', f'{args.optim}'])
-    save_path = os.path.join(save_dir, filename)
+    # file name without "_run#" appended
+    filename_prefix = "_".join([f'{args.alg}', f'{args.backbone}', f'{args.optim}'])
+    # append "_run#" at end (start with 1 for first file)
+    save_path = generate_filepath(os.path.join(save_dir, filename_prefix), 1)
 
-    if len(args.weights) > 0:
-        assert len(args.weights) != args.k
-        weights = torch.tensor(args.weights, dtype=torch.float32)
-    else:
+    if args.weights == None or len(args.weights) == 0:
         weights = None
+    else:
+        assert len(args.weights) == args.k
+        weights = torch.tensor(args.weights, dtype=torch.float32)
 
     # generate data
     data_dict = generate_cube_data(args.n, args.v, args.d, args.k, weights)
@@ -94,7 +125,7 @@ def main():
     trainloader = DataLoader(trainset, batch_size=args.batch_size)
     valloader = DataLoader(valset, batch_size=args.batch_size)
 
-    # initialize encoder
+    # initialize backbone
     if args.backbone == "linear":
         backbone = nn.Linear(args.d, args.k)
     elif args.backbone == "mlp":
@@ -106,19 +137,23 @@ def main():
     else:
         raise Exception("Invalid argument 'backbone', must be one of {'linear', 'mlp'}")
 
-    # ssl_model refers to both the encoder and the SSL class used to train it
-    # the specific class of ssl_model is an SSL algorithm wrapper for the encoder
+    # ssl_model refers to both the backbone and the SSL class used to train it
+    # the specific class of ssl_model is an SSL algorithm wrapper for the backbone
     if args.alg == "spectral":
         ssl_model = Spectral(backbone=backbone, emb_dim=args.k)
     elif args.alg == "mssl_a":
-        ssl_model = MatrixSSL(backbone=backbone, emb_dim=args.k, assym=True)
+        if args.momentum is None or (not (0 <= args.momentum <= 1)):
+            raise Exception("Momentum must be set to a value within [0, 1] for asymmetric MatrixSSL")
+        if args.hidden_dim is None:
+            raise Exception("Hidden predictor dimension hidden_dim not specified")
+        ssl_model = MatrixSSL(backbone=backbone, emb_dim=args.k, hidden_dim=args.hidden_dim, asym=True, momentum=args.momentum)
     elif args.alg == "mssl_s":
-        ssl_model = MatrixSSL(backbone=backbone, emb_dim=args.k, assym=False)
+        ssl_model = MatrixSSL(backbone=backbone, emb_dim=args.k, asym=False)
     else:
         raise Exception("Invalid argument 'alg', must be one of {'spectral', 'mssl_a', 'mssl_s'}")
 
     if args.optim == "sgd":
-        opt = optim.SGD(ssl_model.parameters(), lr=0.01)
+        opt = optim.SGD(ssl_model.parameters(), lr=0.1)
     elif args.optim == "adam":
         opt = optim.Adam(ssl_model.parameters(), lr=10e-3)
     elif args.optim == "adam_wd":
@@ -128,13 +163,16 @@ def main():
     
     epochs = args.epochs
 
+    # linear classification loss on the validation set (not sure if this is supposed to be called a validation set)
+    val_losses = []
+
     # Training loop. See ssl_model class for specific forward passes
     for epoch in range(epochs):
 
-        # UPDATE WEIGHTS OF ENCODER
+        # UPDATE WEIGHTS OF BACKBONE
         ssl_model.train()
-        # listen to gradient calculations for encoder
-        for param in ssl_model.encoder.parameters():
+        # listen to gradient calculations for backbone
+        for param in ssl_model.backbone.parameters():
             param.requires_grad = True
 
         for idx, (x1, x2) in enumerate(trainloader):
@@ -146,11 +184,22 @@ def main():
             loss.backward()
             # update weights
             opt.step()
+            
+            # Definitely seeing vanishing gradients...
+            if idx == len(trainloader) - 2:
+                for name, param in ssl_model.named_parameters():
+                    print(name, param.grad)
+
+            # Momentum averaging for mssl with asymmetric networks
+            if getattr(ssl_model, "asym", False):
+                with torch.no_grad():
+                    for online_param, target_param in zip(ssl_model.online.parameters(), ssl_model.target.parameters()):
+                        target_param.mul_(args.momentum).add_((1-args.momentum) * online_param)
         
         # EVALUATE DOWNSTREAM LIN CLF PERFORMANCE AT END OF EACH EPOCH
         ssl_model.eval()
-        # stop calculating gradients for encoder
-        for param in ssl_model.encoder.parameters():
+        # stop calculating gradients for backbone
+        for param in ssl_model.backbone.parameters():
             param.requires_grad = False
 
         # instantiate linear classifier
@@ -158,22 +207,26 @@ def main():
         # fit linear classifier, print classification accuracy on validation set
         clf_acc = fit_classifier(
             linear,
-            ssl_model.encoder,
+            ssl_model.backbone,
             valloader,
             nn.BCELoss(),
             optim.SGD(linear.parameters(), lr=0.1, momentum=0.9)
             )
         print(f'Epoch {epoch+1} classification accuracy: {clf_acc}')
+        val_losses.append(clf_acc)
 
     # store model weights, trainval+true_w data, batch_size (for recreating dataloader), optimizer to save_path 
     run_dict = {
         "model_weights":ssl_model.backbone.state_dict(),
         "data": data_dict, # train, validation data
         "batch_size": args.batch_size,
-        "optim": args.optim
+        "optim": args.optim,
+        "val_losses":val_losses
     }
     torch.save(run_dict, save_path)
 
 
 if __name__ == '__main__':
     main()
+
+# %%
