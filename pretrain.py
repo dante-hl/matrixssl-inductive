@@ -164,7 +164,7 @@ def main():
     epochs = args.epochs
 
     # linear classification loss on the validation set (not sure if this is supposed to be called a validation set)
-    val_losses = []
+    val_accs = []
 
     # Training loop. See ssl_model class for specific forward passes
     for epoch in range(epochs):
@@ -192,13 +192,15 @@ def main():
             # Momentum averaging for mssl with asymmetric networks
             if getattr(ssl_model, "asym", False):
                 with torch.no_grad():
+                    # terminates at end of shortest iterator, excludes predictor weights
+                    # need to ensure backbone and projector networks the same..?
                     for online_param, target_param in zip(ssl_model.online.parameters(), ssl_model.target.parameters()):
                         target_param.mul_(args.momentum).add_((1-args.momentum) * online_param)
         
         # EVALUATE DOWNSTREAM LIN CLF PERFORMANCE AT END OF EACH EPOCH
         ssl_model.eval()
-        # stop calculating gradients for backbone
-        for param in ssl_model.backbone.parameters():
+        # stop calculating gradients for backbone in online network
+        for param in ssl_model.online_backbone.parameters():
             param.requires_grad = False
 
         # instantiate linear classifier
@@ -206,21 +208,21 @@ def main():
         # fit linear classifier, print classification accuracy on validation set
         clf_acc = fit_classifier(
             linear,
-            ssl_model.backbone,
+            ssl_model.online_backbone,
             valloader,
             nn.BCELoss(),
             optim.SGD(linear.parameters(), lr=0.1, momentum=0.9)
             )
         print(f'Epoch {epoch+1} classification accuracy: {clf_acc}')
-        val_losses.append(clf_acc)
+        val_accs.append(clf_acc)
 
     # store model weights, trainval+true_w data, batch_size (for recreating dataloader), optimizer to save_path 
     run_dict = {
-        "model_weights":ssl_model.backbone.state_dict(),
+        "model_weights":ssl_model.online_backbone.state_dict(),
         "data": data_dict, # train, validation data
         "batch_size": args.batch_size,
         "optim": args.optim,
-        "val_losses":val_losses
+        "val_accs":val_accs
     }
     torch.save(run_dict, save_path)
 
