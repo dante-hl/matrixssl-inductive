@@ -2,6 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import copy
 #  %%
 
 def centering_matrix(b: int):
@@ -106,11 +107,10 @@ def mce_loss_func(p, z, lamda=1., mu=1., order=4, align_gamma=0.003, correlation
     if correlation:
         P = lamda * torch.eye(n)
         Q = (1. / m) * (p.T @ J_m @ z) + mu * torch.eye(n)
-        # return torch.trace(- P @ matrix_log(Q, order))
     else:
         P = (1. / m) * (p.T @ J_m @ p) + mu * torch.eye(n)
         Q = (1. / m) * (z.T @ J_m @ z) + mu * torch.eye(n)
-        # return torch.trace(- P @ matrix_log(Q, order) + Q)
+    return torch.trace(- P @ matrix_log(Q, order))
     
 
 
@@ -134,23 +134,37 @@ class MatrixSSL(nn.Module):
         if asym:
             self.momentum = momentum
             self.hidden_dim = hidden_dim
+
+            self.online_backbone = copy.deepcopy(self.backbone)
+            self.target_backbone = copy.deepcopy(self.backbone)
+
             # start with making everything linear, just one layer
-            # make each of proejctor and predictor smaller....
-            self.projector = nn.Sequential(nn.Linear(emb_dim, emb_dim, bias=False),
-                                           nn.BatchNorm1d(emb_dim),
-                                           nn.ReLU(inplace=True), # first layer
-                                           nn.Linear(emb_dim, emb_dim, bias=False),
-                                           nn.BatchNorm1d(emb_dim),
-                                           nn.ReLU(inplace=True), # second layer
-                                        #    self.encoder.fc,
-                                           nn.BatchNorm1d(emb_dim, affine=False) 
-                                          ) # TODO figure if BatchNorm1d needed
-            self.predictor = nn.Sequential(nn.Linear(emb_dim, hidden_dim, bias=False),
-                                        nn.BatchNorm1d(hidden_dim),
-                                        nn.ReLU(inplace=True), # hidden layer
-                                        nn.Linear(hidden_dim, emb_dim)) # output layer
-            self.online = nn.Sequential(self.backbone, self.projector, self.predictor)
-            self.target = nn.Sequential(self.backbone, self.projector)
+            self.online_projector = nn.Linear(emb_dim, emb_dim, bias=False)
+            self.target_projector = nn.Linear(emb_dim, emb_dim, bias=False)
+
+            self.predictor = nn.Linear(emb_dim, emb_dim, bias=False) # only in online network
+            # self.projector = nn.Sequential(
+            #     nn.Linear(emb_dim, hidden_dim, bias=False), 
+            #     nn.BatchNorm1d(hidden_dim),
+            #     nn.Linear(hidden_dim, emb_dim, bias=False))
+            
+            # self.predictor = nn.Sequential(
+            #     nn.Linear(emb_dim, emb_dim, bias=False))
+
+            self.online = nn.Sequential(
+                self.online_backbone, 
+                self.online_projector,
+                self.predictor
+                )
+            self.target = nn.Sequential(
+                self.target_backbone, 
+                self.target_projector
+                )
+
+            # ensure target network weights aren't updated via autograd
+            for param in self.target.parameters():
+                param.requires_grad = False
+
         else:
             self.encoder = nn.Sequential(self.backbone)
 

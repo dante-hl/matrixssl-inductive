@@ -153,7 +153,7 @@ def main():
         raise Exception("Invalid argument 'alg', must be one of {'spectral', 'mssl_a', 'mssl_s'}")
 
     if args.optim == "sgd":
-        opt = optim.SGD(ssl_model.parameters(), lr=0.1)
+        opt = optim.SGD(ssl_model.parameters(), lr=0.01)
     elif args.optim == "adam":
         opt = optim.Adam(ssl_model.parameters(), lr=10e-3)
     elif args.optim == "adam_wd":
@@ -169,10 +169,10 @@ def main():
     # Training loop. See ssl_model class for specific forward passes
     for epoch in range(epochs):
 
-        # UPDATE WEIGHTS OF BACKBONE
+        # UPDATE WEIGHTS OF ONLINE NETWORK
         ssl_model.train()
-        # listen to gradient calculations for backbone
-        for param in ssl_model.backbone.parameters():
+        # listen to gradient calculations for online network
+        for param in ssl_model.online.parameters():
             param.requires_grad = True
 
         for idx, (x1, x2) in enumerate(trainloader):
@@ -185,10 +185,9 @@ def main():
             # update weights
             opt.step()
             
-            # Definitely seeing vanishing gradients...
-            if idx == len(trainloader) - 2:
-                for name, param in ssl_model.named_parameters():
-                    print(name, param.grad)
+            # if idx == len(trainloader) - 2:
+            #     for name, param in ssl_model.named_parameters():
+            #         print(name, param.grad)
 
             # Momentum averaging for mssl with asymmetric networks
             if getattr(ssl_model, "asym", False):
