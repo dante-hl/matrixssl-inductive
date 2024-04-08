@@ -25,7 +25,7 @@ def parse_args():
     parser.add_argument("--optim", type=str, required=True, help="optimizer, one of {'sgd', 'adam', 'adam_wd} adam_wd means adam with weight decay")
 
     # Data generation arguments
-    parser.add_argument("-n", type=int, default=50000, help="number of data points")
+    parser.add_argument("-n", type=int, default=(2 ** 16) + 12500, help="number of data points")
     parser.add_argument("-v", type=int, default=12500, help="size of validation set, input some v<n")
     parser.add_argument("-d", type=int, default=50, help="dimension of data")
     parser.add_argument("-k", type=int, default=10, help="number invariant dimensions")
@@ -33,9 +33,9 @@ def parse_args():
 
     # Other training arguments
     parser.add_argument("--epochs", type=int, default=150, help="number training epochs")
-                        # TODO Change default here ^ back to 500 once done experimenting
+                        # TODO Change default here ^ back to 500 <- 150 once done experimenting
                         # TODO Change default here v back to 512... ?
-    parser.add_argument("--batch_size", type=int, default=32, help="size of training minibatch")
+    parser.add_argument("--batch_size", type=int, default=128, help="size of training minibatch")
 
     # Conditional arguments 
     parser.add_argument("--momentum", type=float, help="momentum averaging parameter for MatrixSSL with asymmetric networks. required if alg set to mssl_a, must be in [0, 1]")
@@ -98,7 +98,6 @@ def generate_filepath(save_path:str, num):
         return candidate_path
 
 
-# ideally: just provide args for model, then train
 def main():
     args = parse_args()
     
@@ -119,11 +118,14 @@ def main():
 
     # generate data
     data_dict = generate_cube_data(args.n, args.v, args.d, args.k, weights)
-    (x1, x2, _), (val_x, val_y) = data_dict['train'], data_dict['val']
+    (x1, x2, y), (val_x, val_y) = data_dict['train'], data_dict['val']
+
     # create dataloader
     trainset, valset = TensorDataset(x1, x2), TensorDataset(val_x, val_y)
     trainloader = DataLoader(trainset, batch_size=args.batch_size)
     valloader = DataLoader(valset, batch_size=args.batch_size)
+
+    print(f'Train Loader length: {len(trainloader)}, Val Loader length: {len(valloader)}')
 
     # initialize backbone
     if args.backbone == "linear":
@@ -153,11 +155,12 @@ def main():
         raise Exception("Invalid argument 'alg', must be one of {'spectral', 'mssl_a', 'mssl_s'}")
 
     if args.optim == "sgd":
-        opt = optim.SGD(ssl_model.parameters(), lr=0.01)
+        opt = optim.SGD(ssl_model.parameters(), lr=1e-3)
     elif args.optim == "adam":
-        opt = optim.Adam(ssl_model.parameters(), lr=10e-3)
+        opt = optim.Adam(ssl_model.parameters(), lr=1e-3)
     elif args.optim == "adam_wd":
-        opt = optim.Adam(ssl_model.parameters(), lr=10e-3, weight_decay=0.004)
+        opt = optim.Adam(ssl_model.parameters(), lr=1e-3, weight_decay=5e-6)
+        # values tried for wd: 1e-6, 
     else:
         raise Exception("Invalid argument 'optim', must be one of {'sgd', 'adam', 'adam_wd'}")
     
@@ -165,6 +168,7 @@ def main():
 
     # linear classification loss on the validation set (not sure if this is supposed to be called a validation set)
     val_accs = []
+    train_losses = []
 
     # Training loop. See ssl_model class for specific forward passes
     for epoch in range(epochs):
@@ -180,6 +184,10 @@ def main():
             # run forward() on ssl_model, which is expected to return a SSL loss on x1, x2
             # the forward function is specific to each SSL algorithm (Spectral, MatrixSSL, etc.)
             loss = ssl_model(x1, x2)['loss']
+
+            # store training loss with each training iteration
+            train_losses.append(loss.item())
+
             # backprop
             loss.backward()
             # update weights
@@ -193,7 +201,7 @@ def main():
             if getattr(ssl_model, "asym", False):
                 with torch.no_grad():
                     # terminates at end of shortest iterator, excludes predictor weights
-                    # need to ensure backbone and projector networks the same..?
+                    # need to ensure backbone and projector networks the same   
                     for online_param, target_param in zip(ssl_model.online.parameters(), ssl_model.target.parameters()):
                         target_param.mul_(args.momentum).add_((1-args.momentum) * online_param)
         
@@ -222,7 +230,9 @@ def main():
         "data": data_dict, # train, validation data
         "batch_size": args.batch_size,
         "optim": args.optim,
-        "val_accs":val_accs
+        "args": args,
+        "val_accs":val_accs,
+        "train_losses":train_losses
     }
     torch.save(run_dict, save_path)
 
