@@ -40,17 +40,17 @@ class Spectral(nn.Module):
         """
         super().__init__()
         self.mu = mu
-        self.backbone = backbone
-        self.projector = projection_identity()
+        self.online_backbone = backbone
+        self.online_projector = projection_identity()
         self.emb_dim = emb_dim
 
-        self.encoder = nn.Sequential(  # f encoder
-            self.backbone,
-            self.projector
+        self.online = nn.Sequential(  # f encoder
+            self.online_backbone,
+            self.online_projector
         )
 
     def forward(self, x1, x2, mu=1.0):
-        f = self.encoder
+        f = self.online
         z1, z2 = f(x1), f(x2)
         L, d_dict = D(z1, z2, mu=self.mu)
         return {'loss': L, 'd_dict': d_dict}

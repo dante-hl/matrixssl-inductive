@@ -139,10 +139,20 @@ class MatrixSSL(nn.Module):
             self.target_backbone = copy.deepcopy(self.backbone)
 
             # start with making everything linear, just one layer
-            self.online_projector = nn.Linear(emb_dim, emb_dim, bias=False)
-            self.target_projector = nn.Linear(emb_dim, emb_dim, bias=False)
+            self.online_projector = nn.Sequential(
+                nn.Linear(emb_dim, emb_dim, bias=False),
+                nn.BatchNorm1d(emb_dim)
+            )
+            self.target_projector = nn.Sequential(
+                nn.Linear(emb_dim, emb_dim, bias=False),
+                nn.BatchNorm1d(emb_dim)
+            )
 
-            self.predictor = nn.Linear(emb_dim, emb_dim, bias=False) # only in online network
+            self.predictor = nn.Sequential(
+                nn.Linear(emb_dim, emb_dim, bias=False),
+                nn.BatchNorm1d(emb_dim)
+            )
+            #nn.Linear(emb_dim, emb_dim, bias=False) # only in online network
             # self.projector = nn.Sequential(
             #     nn.Linear(emb_dim, hidden_dim, bias=False), 
             #     nn.BatchNorm1d(hidden_dim),

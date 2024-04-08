@@ -4,7 +4,7 @@ import numpy as np
 
 # %%
 # ignoring labelling: str = 'single', for now, add more if you need
-def generate_cube_data(n: int = 50000, v: int = 12500, d: int = 50, k: int = 10, weights=None):
+def generate_cube_data(n: int = (2 ** 16) + 12500, v: int = 12500, d: int = 50, k: int = 10, weights=None):
     """
     Generates `n` points in the `d`-dimensional hypercube {-1, 1}^d, with a train-val split of n-v:v.
 
@@ -24,7 +24,7 @@ def generate_cube_data(n: int = 50000, v: int = 12500, d: int = 50, k: int = 10,
     natural = 2 * torch.rand((n, d)) - 1  # uniform in (-1, 1)
     val_x = natural[-v:, :]  # (v, d)
     train_x = natural[:n - v, :]  # (n-v, d)
-    print(train_x.shape)
+    
     tau1, tau2 = torch.ones_like(train_x), torch.ones_like(train_x)
     tau1[:, k:] *= torch.rand((n - v, d - k))
     tau2[:, k:] *= torch.rand((n - v, d - k))
