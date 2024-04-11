@@ -25,21 +25,25 @@ def parse_args():
     parser.add_argument("--optim", type=str, required=True, help="optimizer, one of {'sgd', 'adam', 'adam_wd} adam_wd means adam with weight decay")
 
     # Data generation arguments
+    parser.add_argument("--augmentation", type=str, required=True, help="specifies how positive pairs are generated, one of {'mult', 'add'}; also determines labeling function. see generate_cube_data function in ./data/loader.py for more information")
+
     parser.add_argument("-n", type=int, default=(2 ** 16) + 12500, help="number of data points")
     parser.add_argument("-v", type=int, default=12500, help="size of validation set, input some v<n")
     parser.add_argument("-d", type=int, default=50, help="dimension of data")
     parser.add_argument("-k", type=int, default=10, help="number invariant dimensions")
-    parser.add_argument("--weights", help="weight tensor for true classification function, optional", nargs="*")
 
     # Other training arguments
     parser.add_argument("--epochs", type=int, default=150, help="number training epochs")
                         # TODO Change default here ^ back to 500 <- 150 once done experimenting
                         # TODO Change default here v back to 512... ?
-    parser.add_argument("--batch_size", type=int, default=128, help="size of training minibatch")
+    parser.add_argument("--bs", type=int, default=128, help="training minibatch size")
+    parser.add_argument("--lr", type=float, default=1e-6, help="optimizer learning rate hyperparam")
+    parser.add_argument("--wd", type=float, default=1e-6, help="optimizer weight decay hyperparam")
+    # weight decay values tried for adam: 1e-6, 5e-6
 
     # Conditional arguments 
     parser.add_argument("--momentum", type=float, help="momentum averaging parameter for MatrixSSL with asymmetric networks. required if alg set to mssl_a, must be in [0, 1]")
-    parser.add_argument("--hidden_dim", type=int, default=20, help="dimension of hidden layer in predictor network for MatrixSSL with assymetric networks. required if alg set to mssl_a")
+    # parser.add_argument("--hidden_dim", type=int, default=20, help="dimension of hidden layer in predictor network for MatrixSSL with assymetric networks. required if alg set to mssl_a")
 
     # Saving/loading
     parser.add_argument("--save_dir", type=str, required=False, help="directory to save model weights/run details to")
@@ -85,7 +89,7 @@ def fit_classifier(linear, backbone, valloader, clf_loss_fn, clf_optim, clf_epoc
 
 def generate_filepath(save_path:str, num):
     """
-    Given save path, returns a compatible path name that doesn't override existing run log files
+    Given directory path to save to, returns a compatible path name that doesn't override existing run log files
 
     save_path: path to save file to, without "_run#" appended
     returns: save_path with compatible "_run#" string appended
@@ -106,24 +110,18 @@ def main():
     else: # save to default: outputs folder
         save_dir = './outputs'
     # file name without "_run#" appended
-    filename_prefix = "_".join([f'{args.alg}', f'{args.backbone}', f'{args.optim}'])
+    filename_prefix = "_".join([f'{args.alg}', f'{args.backbone}', f'{args.optim}', f'augment={args.augmentation}', f'epochs={args.epochs}', f'bs={args.bs}', f'wd={args.wd}'])
     # append "_run#" at end (start with 1 for first file)
     save_path = generate_filepath(os.path.join(save_dir, filename_prefix), 1)
 
-    if args.weights == None or len(args.weights) == 0:
-        weights = None
-    else:
-        assert len(args.weights) == args.k
-        weights = torch.tensor(args.weights, dtype=torch.float32)
-
     # generate data
-    data_dict = generate_cube_data(args.n, args.v, args.d, args.k, weights)
+    data_dict = generate_cube_data(args.n, args.v, args.d, args.k, args.augmentation)
     (x1, x2, y), (val_x, val_y) = data_dict['train'], data_dict['val']
 
     # create dataloader
     trainset, valset = TensorDataset(x1, x2), TensorDataset(val_x, val_y)
-    trainloader = DataLoader(trainset, batch_size=args.batch_size)
-    valloader = DataLoader(valset, batch_size=args.batch_size)
+    trainloader = DataLoader(trainset, batch_size=args.bs)
+    valloader = DataLoader(valset, batch_size=args.bs)
 
     print(f'Train Loader length: {len(trainloader)}, Val Loader length: {len(valloader)}')
 
@@ -145,7 +143,7 @@ def main():
         ssl_model = Spectral(backbone=backbone, emb_dim=args.k)
     elif args.alg == "mssl_a":
         if args.momentum is None or (not (0 <= args.momentum <= 1)):
-            raise Exception("Momentum must be set to a value within [0, 1] for asymmetric MatrixSSL")
+            raise Exception("Momentum averaging parameter must be set to a value within [0, 1] for asymmetric MatrixSSL")
         if args.hidden_dim is None:
             raise Exception("Hidden predictor dimension hidden_dim not specified")
         ssl_model = MatrixSSL(backbone=backbone, emb_dim=args.k, hidden_dim=args.hidden_dim, asym=True, momentum=args.momentum)
@@ -157,12 +155,10 @@ def main():
     if args.optim == "sgd":
         opt = optim.SGD(ssl_model.parameters(), lr=1e-3)
     elif args.optim == "adam":
-        opt = optim.Adam(ssl_model.parameters(), lr=1e-3)
-    elif args.optim == "adam_wd":
-        opt = optim.Adam(ssl_model.parameters(), lr=1e-3, weight_decay=5e-6)
-        # values tried for wd: 1e-6, 
+        opt = optim.Adam(ssl_model.parameters(), lr=1e-3, weight_decay=args.wd)
+        # values tried for wd: 1e-6,
     else:
-        raise Exception("Invalid argument 'optim', must be one of {'sgd', 'adam', 'adam_wd'}")
+        raise Exception("Invalid argument 'optim', must be one of {'sgd', 'adam'}")
     
     epochs = args.epochs
 
@@ -228,7 +224,6 @@ def main():
     run_dict = {
         "model_weights":ssl_model.online_backbone.state_dict(),
         "data": data_dict, # train, validation data
-        "batch_size": args.batch_size,
         "optim": args.optim,
         "args": args,
         "val_accs":val_accs,
