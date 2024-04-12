@@ -52,7 +52,7 @@ def parse_args():
     return args
 
 
-def fit_classifier(linear, backbone, valloader, clf_loss_fn, clf_optim, clf_epochs=None):
+def fit_classifier(linear, backbone, valloader, clf_loss_fn, clf_optim, device, clf_epochs=None):
     """
     Fits linear classifier on representations learned so far using validation dataset, outputs classification accuracy of classifier after fitting. Returns classification accuracy on validation set
 
@@ -67,6 +67,7 @@ def fit_classifier(linear, backbone, valloader, clf_loss_fn, clf_optim, clf_epoc
     """
 
     for idx, (x, y) in enumerate(valloader):
+        x, y = x.to(device), y.to(device)
         # zero gradients
         clf_optim.zero_grad()
         # get linear classif predictor
@@ -110,7 +111,7 @@ def main():
     else: # save to default: outputs folder
         save_dir = './outputs'
     # file name without "_run#" appended
-    filename_prefix = "_".join([f'{args.alg}', f'{args.backbone}', f'{args.optim}', f'augment={args.augmentation}', f'epochs={args.epochs}', f'bs={args.bs}', f'wd={args.wd}'])
+    filename_prefix = "_".join([f'{args.alg}', f'{args.backbone}', f'{args.optim}', f'augment={args.augmentation}', f'epochs={args.epochs}', f'bs={args.bs}', f'lr={args.lr}', f'wd={args.wd}'])
     # append "_run#" at end (start with 1 for first file)
     save_path = generate_filepath(os.path.join(save_dir, filename_prefix), 1)
 
@@ -137,6 +138,7 @@ def main():
     else:
         raise Exception("Invalid argument 'backbone', must be one of {'linear', 'mlp'}")
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # ssl_model refers to both the backbone and the SSL class used to train it
     # the specific class of ssl_model is an SSL algorithm wrapper for the backbone
     if args.alg == "spectral":
@@ -149,6 +151,7 @@ def main():
         ssl_model = MatrixSSL(backbone=backbone, emb_dim=args.k, asym=False)
     else:
         raise Exception("Invalid argument 'alg', must be one of {'spectral', 'mssl_a', 'mssl_s'}")
+    ssl_model = ssl_model.to(device)
 
     if args.optim == "sgd":
         opt = optim.SGD(ssl_model.parameters(), lr=1e-3, weight_decay=args.wd)
@@ -174,6 +177,7 @@ def main():
             param.requires_grad = True
 
         for idx, (x1, x2) in enumerate(trainloader):
+            x1, x2 = x1.to(device), x2.to(device)
             opt.zero_grad()
             # run forward() on ssl_model, which is expected to return a SSL loss on x1, x2
             # the forward function is specific to each SSL algorithm (Spectral, MatrixSSL, etc.)
@@ -184,6 +188,7 @@ def main():
 
             # backprop
             loss.backward()
+            del loss, x1, x2
             # update weights
             opt.step()
             
@@ -206,7 +211,7 @@ def main():
             param.requires_grad = False
 
         # instantiate linear classifier
-        linear = nn.Linear(ssl_model.emb_dim, 1)
+        linear = nn.Linear(ssl_model.emb_dim, 1).to(device)
         # fit linear classifier, print classification accuracy on validation set
         clf_acc = fit_classifier(
             linear,
@@ -214,7 +219,9 @@ def main():
             valloader,
             nn.BCELoss(),
             optim.SGD(linear.parameters(), lr=0.1, momentum=0.9)
+            device=device
             )
+        del linear
         print(f'Epoch {epoch+1} classification accuracy: {clf_acc}')
         val_accs.append(clf_acc)
 
