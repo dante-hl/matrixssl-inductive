@@ -116,11 +116,10 @@ def mce_loss_func(p, z, lamda=1., mu=1., order=4, align_gamma=0.003, correlation
 
 
 class MatrixSSL(nn.Module):
-    def __init__(self, backbone, emb_dim, hidden_dim, gamma: float = 1.0, asym=True, momentum=0.9):
+    def __init__(self, backbone, emb_dim, gamma: float = 1.0, asym=True, momentum=0.9):
         """
         backbone: encoder/embedding function
         emb_dim: embedding dimension 
-        hidden_dim: hidden dimension in predictor network
         gamma: weight ratio in alignment loss (see alignment loss func)
         asym: whether we use asymmetric siamese (online-target) networks, with momentum averaging for the target network
         momentum: momentum parameter for moving average of target network. only required if asym = True. must be within [0, 1]
@@ -133,7 +132,6 @@ class MatrixSSL(nn.Module):
         self.emb_dim = emb_dim
         if asym:
             self.momentum = momentum
-            self.hidden_dim = hidden_dim
 
             self.online_backbone = copy.deepcopy(self.backbone)
             self.target_backbone = copy.deepcopy(self.backbone)

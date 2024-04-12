@@ -144,16 +144,14 @@ def main():
     elif args.alg == "mssl_a":
         if args.momentum is None or (not (0 <= args.momentum <= 1)):
             raise Exception("Momentum averaging parameter must be set to a value within [0, 1] for asymmetric MatrixSSL")
-        if args.hidden_dim is None:
-            raise Exception("Hidden predictor dimension hidden_dim not specified")
-        ssl_model = MatrixSSL(backbone=backbone, emb_dim=args.k, hidden_dim=args.hidden_dim, asym=True, momentum=args.momentum)
+        ssl_model = MatrixSSL(backbone=backbone, emb_dim=args.k, asym=True, momentum=args.momentum)
     elif args.alg == "mssl_s":
         ssl_model = MatrixSSL(backbone=backbone, emb_dim=args.k, asym=False)
     else:
         raise Exception("Invalid argument 'alg', must be one of {'spectral', 'mssl_a', 'mssl_s'}")
 
     if args.optim == "sgd":
-        opt = optim.SGD(ssl_model.parameters(), lr=1e-3)
+        opt = optim.SGD(ssl_model.parameters(), lr=1e-3, weight_decay=args.wd)
     elif args.optim == "adam":
         opt = optim.Adam(ssl_model.parameters(), lr=1e-3, weight_decay=args.wd)
         # values tried for wd: 1e-6,
