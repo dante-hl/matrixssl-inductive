@@ -28,10 +28,12 @@ def matrix_log(X: torch.tensor, order: int = 4):
     """
     matrix_log, from MEC. uses taylor expansion approximation
     """
+    device = X.device
     assert X.shape[0] == X.shape[1]
     d = X.shape[0]
-    series = torch.zeros_like(X).detach()
-    mult = X - torch.eye(d)
+    series = torch.zeros_like(X).detach().to(device)
+    I_d = torch.eye(d).to(device)
+    mult = X - I_d
     summand = mult
     for i in range(1, order + 1):
         if i % 2 == 1:
@@ -39,6 +41,7 @@ def matrix_log(X: torch.tensor, order: int = 4):
         else:
             series = series - (1. / float(i)) * summand
         summand = summand @ mult
+    del mult, I_d
     return series
 
 
@@ -96,20 +99,22 @@ def mce_loss_func(p, z, lamda=1., mu=1., order=4, align_gamma=0.003, correlation
     """
     Taken from MCE
     """
+    device = p.device
     p = F.normalize(p)  # wait... need to be normalized...???
     z = F.normalize(z)
 
     m = z.shape[0]
     n = z.shape[1]
     # print(m, n)
-    J_m = centering_matrix(m).detach()
+    J_m = centering_matrix(m).detach().to(device)
+    mu_I = mu * torch.eye(n).to(device)
     
     if correlation:
-        P = lamda * torch.eye(n)
-        Q = (1. / m) * (p.T @ J_m @ z) + mu * torch.eye(n)
+        P = lamda * torch.eye(n).to(device)
+        Q = (1. / m) * (p.T @ J_m @ z) + mu_I
     else:
-        P = (1. / m) * (p.T @ J_m @ p) + mu * torch.eye(n)
-        Q = (1. / m) * (z.T @ J_m @ z) + mu * torch.eye(n)
+        P = (1. / m) * (p.T @ J_m @ p) + mu_I
+        Q = (1. / m) * (z.T @ J_m @ z) + mu_I
     return torch.trace(- P @ matrix_log(Q, order))
     
 
