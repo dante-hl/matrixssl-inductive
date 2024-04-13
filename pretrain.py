@@ -1,4 +1,5 @@
 # %%
+# %%
 # set cwd set to matrixssl-inductive
 import os
 os.chdir(os.path.dirname(__file__))
@@ -8,6 +9,7 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import time
 
 from torch.utils.data import TensorDataset, DataLoader
 
@@ -75,6 +77,7 @@ def fit_classifier(linear, backbone, valloader, clf_loss_fn, clf_optim, device, 
         # calculate loss on labels, backprop
         clf_loss = clf_loss_fn(pred, y)
         clf_loss.backward()
+        del x, y
         # update weights
         clf_optim.step()
     
@@ -82,9 +85,11 @@ def fit_classifier(linear, backbone, valloader, clf_loss_fn, clf_optim, device, 
         total_count = 0
         correct_count = 0
         for idx, (x, y) in enumerate(valloader):
+            x, y = x.to(device), y.to(device)
             pred = (torch.sigmoid(linear(backbone(x))) >= 0.5).flatten()
             correct_count += torch.sum(pred == y)
             total_count += len(y)
+            del x, y
         clf_acc = correct_count / total_count
     return clf_acc
 
@@ -169,6 +174,7 @@ def main():
 
     # Training loop. See ssl_model class for specific forward passes
     for epoch in range(epochs):
+        start_time = time.time()
 
         # UPDATE WEIGHTS OF ONLINE NETWORK
         ssl_model.train()
@@ -218,12 +224,14 @@ def main():
             ssl_model.online_backbone,
             valloader,
             nn.BCELoss(),
-            optim.SGD(linear.parameters(), lr=0.1, momentum=0.9)
+            optim.SGD(linear.parameters(), lr=0.1, momentum=0.9),
             device=device
             )
         del linear
         print(f'Epoch {epoch+1} classification accuracy: {clf_acc}')
         val_accs.append(clf_acc)
+        end_time = time.time()
+        print(f'Epoch time: {end_time - start_time}')
 
     # store model weights, trainval+true_w data, batch_size (for recreating dataloader), optimizer to save_path 
     run_dict = {
