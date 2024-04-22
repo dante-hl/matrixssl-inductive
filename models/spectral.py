@@ -7,8 +7,13 @@ from torchvision.models import resnet50
 
 # %%
 def D(z1, z2, mu=1.0):
+    """
+    Spectral Contrastive Loss (implementation from HaoChen et. al.)
+    """
+    # mask for if ith row has 2-norm less than mu=1.0
     mask1 = (torch.norm(z1, p=2, dim=1) < np.sqrt(mu)).float().unsqueeze(1)
     mask2 = (torch.norm(z2, p=2, dim=1) < np.sqrt(mu)).float().unsqueeze(1)
+    # replace any rows which 2-norm greater than mu with its norm=mu/normalized version
     z1 = mask1 * z1 + (1 - mask1) * F.normalize(z1, dim=1) * np.sqrt(mu)
     z2 = mask2 * z2 + (1 - mask2) * F.normalize(z2, dim=1) * np.sqrt(mu)
     loss_part1 = -2 * torch.mean(z1 * z2) * z1.shape[1]

@@ -18,11 +18,12 @@ def generate_cube_data(n: int = (2 ** 16) + 12500, v: int = 12500, d: int = 50, 
     augmentation: string specifying type of augmentation: note that this also specifies the labeling function, since augmentations must be label preserving.
         'mult': scales each invariant dimension independently by a scalar tau ~ U(0, 1]. resulting labeling function  uses a linear classifier with randomly sampled weights from N(0, 1) on the first k (invariant) dimensions of data
         'add': for each pair of dimensions, samples tau ~ U(0, 1], then adds to one dimension and subtracts from the other. requires an even number of spurious dimensions to guarantee label preservation. labeling function returns the sign of the sum of all spurious dimension values.
+        'corr': TODO explain
 
     Returns dictionary: {"train":(x1, x2, y), "val":(val_x, val_y), "truth":truth}
     Training set: x1, x2, (n-v, d) arrays of augmented data, and labels y (n-v,).
     Validation set: val_x (v, d), val_y (v,)
-    Truth: if augmentation='mult', then the true linear classif weights. if 'add', then the string 'spurious_sum' (to indicate summing spurious dimensions)
+    Truth: if augmentation='mult', then the true linear classif weights. if 'add'/'corr', then None
     """
     assert k < d  # can it be equal..?
     natural = 2 * torch.rand((n, d)) - 1  # uniform in (-1, 1)
@@ -35,6 +36,7 @@ def generate_cube_data(n: int = (2 ** 16) + 12500, v: int = 12500, d: int = 50, 
         tau1, tau2 = torch.ones_like(train_x), torch.ones_like(train_x)
         tau1[:, k:] *= torch.rand((n - v, d - k))
         tau2[:, k:] *= torch.rand((n - v, d - k))
+
         x1, x2 = train_x * tau1, train_x * tau2
         # instantiate labeling function weights (truth)
         truth = torch.zeros(d)
@@ -46,28 +48,47 @@ def generate_cube_data(n: int = (2 ** 16) + 12500, v: int = 12500, d: int = 50, 
         # augment by adding and subtracting tau
         assert (d - k) % 2 == 0
         half = int((d-k)/2) # half number of spurious features
-        tau1, tau2 = torch.zeros_like(train_x), torch.zeros_like(train_x)
+        additive1, additive2 = torch.zeros_like(train_x), torch.zeros_like(train_x)
 
-        additive1 = torch.rand((n-v, half))
-        tau1[:, k:k + half] += additive1
-        tau1[:, k+half:] -= additive1
+        tau1 = torch.rand((n-v, half))
+        additive1[:, k:k + half] += tau1
+        additive1[:, k+half:] -= tau1
 
-        additive2 = torch.rand((n-v, half))
-        tau2[:, k:k + half] += additive2
-        tau2[:, k+half:] -= additive2
+        tau2 = torch.rand((n-v, half))
+        additive2[:, k:k+half] += tau2
+        additive2[:, k+half:] -= tau2
 
-        # print(f'Additive1: {additive1}')
-        # print(f'Additive2: {additive2}')
+        x1, x2 = train_x + additive1, train_x + additive2
 
-        x1, x2 = train_x + tau1, train_x + tau2
         # create labels: {-1, 1} -> {0, 1}
         y = (torch.sign(torch.sum(train_x[:, k:], dim=1)) + 1)/2
         val_y = (torch.sign(torch.sum(val_x[:, k:], dim=1)) + 1)/2
 
-        truth = 'spurious_sum'
+        truth = None
+    elif augmentation == 'corr':
+
+        half = int((d-k)/2) # half number of spurious features
+        additive1, additive2 = torch.zeros_like(train_x), torch.zeros_like(train_x)
+
+        tau1 = 2 * torch.rand((n-v, half)) - 1 # sample tau ~ U[-1, 1]
+        additive1[:, k:k + half] += tau1 * train_x[:, k+half:]
+        additive1[:, k+half:] += tau1 * train_x[:, k:k + half]
+
+        tau2 = 2 * torch.rand((n-v, half)) - 1
+        additive2[:, k:k + half] += tau2 * train_x[:, k+half:]
+        additive2[:, k+half:] += tau2 * train_x[:, k:k + half]
+
+        x1, x2 = train_x + additive1, train_x + additive2
+        # create labels: {-1, 1} -> {0, 1}
+        # TRY RUNNING WITH LABEL ONLY DEPENDING ON 1 DIMENSION...
+        y = (torch.sign(train_x[:, 0]) + 1)/2
+        val_y = (torch.sign(val_x[:, 0]) + 1)/2
+        # y = (torch.sign(torch.sum(train_x[:, :k], dim=1)) + 1)/2
+        # val_y = (torch.sign(torch.sum(val_x[:, :k], dim=1)) + 1)/2
+
+        truth = None
     else:
         raise Exception("Invalid augmentation, expected one of {'mult', 'add'}")
-    # print(f"weights: {true_w}")
 
     return {"train":(x1, x2, y), "val":(val_x, val_y), "truth":truth}
 

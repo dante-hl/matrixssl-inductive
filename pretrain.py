@@ -20,11 +20,12 @@ from models import Spectral, MatrixSSL
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    # Algorithm, encoder, optimizer
+    # Algorithm, encoder, optimizer, embedding dimension
     parser.add_argument("--alg", type=str, required=True, 
     help="SSL algorithm to train, one of {'spectral', 'mssl_a', 'mssl_s'}. mssl_a, mssl_s refer to MatrixSSL with asymmetric (online, target) networks and a single network, respectively")
-    parser.add_argument("--backbone", type=str, required=True, help="architecture used, one of {'linear', 'mlp'}")
-    parser.add_argument("--optim", type=str, required=True, help="optimizer, one of {'sgd', 'adam', 'adam_wd} adam_wd means adam with weight decay")
+    parser.add_argument("--backbone", type=str, required=True, help="backbone architecture, one of {'linear', 'mlp'}")
+    parser.add_argument("--optim", type=str, required=True, help="optimizer, one of {'sgd', 'adam'}")
+    parser.add_argument("--emb_dim", type=int, default=10, help="embedding dimension")
 
     # Data generation arguments
     parser.add_argument("--augmentation", type=str, required=True, help="specifies how positive pairs are generated, one of {'mult', 'add'}; also determines labeling function. see generate_cube_data function in ./data/loader.py for more information")
@@ -111,12 +112,13 @@ def generate_filepath(save_path:str, num):
 def main():
     args = parse_args()
     
+    # handle save directory and saved file name
     if args.save_dir is not None:
         save_dir = args.save_dir if os.path.isdir(args.save_dir) else os.makdirs(args.save_dir)
     else: # save to default: outputs folder
         save_dir = './outputs'
     # file name without "_run#" appended
-    filename_prefix = "_".join([f'{args.alg}', f'{args.backbone}', f'{args.optim}', f'augment={args.augmentation}', f'epochs={args.epochs}', f'bs={args.bs}', f'lr={args.lr}', f'wd={args.wd}'])
+    filename_prefix = "_".join([f'{args.alg}', f'{args.backbone}', f'{args.optim}', f'embd={args.emb_dim}', f'augment={args.augmentation}', f'epochs={args.epochs}', f'bs={args.bs}', f'lr={args.lr}', f'wd={args.wd}'])
     # append "_run#" at end (start with 1 for first file)
     save_path = generate_filepath(os.path.join(save_dir, filename_prefix), 1)
 
@@ -131,44 +133,48 @@ def main():
 
     print(f'Train Loader length: {len(trainloader)}, Val Loader length: {len(valloader)}')
 
-    # initialize backbone
-    if args.backbone == "linear":
-        backbone = nn.Linear(args.d, args.k)
+    # define embedding dimension
+    emb_d = args.emb_dim
+
+    # initialize backbone, using embedding dimension determined above
+    if args.backbone == "linear":          
+        backbone = nn.Linear(args.d, emb_d)
     elif args.backbone == "mlp":
         backbone = nn.Sequential(
             nn.Linear(args.d, 2*args.d),
             nn.ReLU(inplace=True),
-            nn.Linear(2*args.d, args.k)
+            nn.Linear(2*args.d, emb_d)
             )
     else:
-        raise Exception("Invalid argument 'backbone', must be one of {'linear', 'mlp'}")
+        raise Exception("Invalid argument 'backbone', expected one of {'linear', 'mlp'}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # ssl_model refers to both the backbone and the SSL class used to train it
-    # the specific class of ssl_model is an SSL algorithm wrapper for the backbone
+    # set up SSL architecture
+    # ssl_model refers to both the backbone and the SSL algorithm/task used to train it
     if args.alg == "spectral":
-        ssl_model = Spectral(backbone=backbone, emb_dim=args.k)
+        ssl_model = Spectral(backbone=backbone, emb_dim=emb_d)
     elif args.alg == "mssl_a":
         if args.momentum is None or (not (0 <= args.momentum <= 1)):
             raise Exception("Momentum averaging parameter must be set to a value within [0, 1] for asymmetric MatrixSSL")
-        ssl_model = MatrixSSL(backbone=backbone, emb_dim=args.k, asym=True, momentum=args.momentum)
+        ssl_model = MatrixSSL(backbone=backbone, emb_dim=emb_d, asym=True, momentum=args.momentum)
     elif args.alg == "mssl_s":
-        ssl_model = MatrixSSL(backbone=backbone, emb_dim=args.k, asym=False)
+        ssl_model = MatrixSSL(backbone=backbone, emb_dim=emb_d, asym=False)
     else:
         raise Exception("Invalid argument 'alg', must be one of {'spectral', 'mssl_a', 'mssl_s'}")
+    # send model to device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ssl_model = ssl_model.to(device)
 
+    # define optimizer
     if args.optim == "sgd":
-        opt = optim.SGD(ssl_model.parameters(), lr=1e-3, weight_decay=args.wd)
+        opt = optim.SGD(ssl_model.parameters(), lr=args.lr, weight_decay=args.wd)
     elif args.optim == "adam":
-        opt = optim.Adam(ssl_model.parameters(), lr=1e-3, weight_decay=args.wd)
-        # values tried for wd: 1e-6,
+        opt = optim.Adam(ssl_model.parameters(), lr=args.lr, weight_decay=args.wd)
     else:
         raise Exception("Invalid argument 'optim', must be one of {'sgd', 'adam'}")
     
     epochs = args.epochs
 
-    # linear classification loss on the validation set (not sure if this is supposed to be called a validation set)
+    # linear classification loss on the validation set
     val_accs = []
     train_losses = []
 
