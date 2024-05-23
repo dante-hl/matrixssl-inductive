@@ -3,6 +3,7 @@
 # set cwd set to matrixssl-inductive
 import os
 os.chdir(os.path.dirname(__file__))
+from datetime import datetime
 from data.loader import generate_cube_data
 # %%
 import argparse
@@ -17,42 +18,69 @@ from models import Spectral, MatrixSSL
 
 # %%
 
+def conditional_arg_default(carg_name, args, set_inplace):
+    """
+    Set default value for input conditional argument name, if needed
+
+    carg_name: name of conditional argument
+    """
+    default_val = None
+    if carg_name == 'momentum':
+        if args.alg == 'mssla' or args.alg == 'mssls': # momentum required for mssl
+            default_val = 0.9
+    if carg_name == 'tau_max':
+        if args.aug == 'corr': # lower and upper bound for uniform sampling of tau needed for aug=corr
+            default_val = 1
+    if default_val is not None:
+        if set_inplace:
+            setattr(args, carg_name, default_val)
+            return
+    return default_val # if getting default, return None if args don't satisfy conditions, or return default value if they do
+    
+
 def parse_args():
     parser = argparse.ArgumentParser()
 
     # Algorithm, encoder, optimizer, embedding dimension
     parser.add_argument("--alg", type=str, required=True, 
-    help="SSL algorithm to train, one of {'spectral', 'mssl_a', 'mssl_s'}. mssl_a, mssl_s refer to MatrixSSL with asymmetric (online, target) networks and a single network, respectively")
+    help="SSL algorithm to train, one of {'spectral', 'mssla', 'mssls'}. mssla, mssls refer to MatrixSSL with asymmetric (online, target) networks and a single network, respectively")
     parser.add_argument("--backbone", type=str, required=True, help="backbone architecture, one of {'linear', 'mlp'}")
     parser.add_argument("--optim", type=str, required=True, help="optimizer, one of {'sgd', 'adam'}")
     parser.add_argument("--emb_dim", type=int, default=10, help="embedding dimension")
 
     # Data generation arguments
-    parser.add_argument("--augmentation", type=str, required=True, help="specifies how positive pairs are generated, one of {'mult', 'add'}; also determines labeling function. see generate_cube_data function in ./data/loader.py for more information")
+    parser.add_argument("--nat", type=str, required=True, help="specifies natural data sampling scheme, one of {'bool', 'unif'}; see generate_cube_data function in ./data/loader.py for more information")
+    parser.add_argument("--aug", type=str, required=True, help="specifies augmentation scheme, one of {'mult', 'add'}. see generate_cube_data function in ./data/loader.py for more information")
+    parser.add_argument("--label", type=str, required=True, help="specifies labeling scheme. see generate_cube_data function in ./data/loader.py for more information")
 
     parser.add_argument("-n", type=int, default=(2 ** 16) + 12500, help="number of data points")
     parser.add_argument("-v", type=int, default=12500, help="size of validation set, input some v<n")
-    parser.add_argument("-d", type=int, default=50, help="dimension of data")
-    parser.add_argument("-k", type=int, default=10, help="number invariant dimensions")
+    parser.add_argument("-d", type=int, default=25, help="dimension of data")
+    parser.add_argument("-k", type=int, default=5, help="number invariant dimensions")
 
     # Other training arguments
-    parser.add_argument("--epochs", type=int, default=150, help="number training epochs")
-                        # TODO Change default here ^ back to 500 <- 150 once done experimenting
-                        # TODO Change default here v back to 512... ?
-    parser.add_argument("--bs", type=int, default=128, help="training minibatch size")
-    parser.add_argument("--lr", type=float, default=1e-6, help="optimizer learning rate hyperparam")
-    parser.add_argument("--wd", type=float, default=1e-6, help="optimizer weight decay hyperparam")
-    # weight decay values tried for adam: 1e-6, 5e-6
+    parser.add_argument("--epochs", type=int, default=100, help="number training epochs")
+    parser.add_argument("--bs", type=int, default=256, help="training minibatch size")
+    parser.add_argument("--lr", type=float, default=1e-3, help="optimizer learning rate hyperparam")
+    parser.add_argument("--wd", type=float, default=1e-5, help="optimizer weight decay hyperparam")
 
     # Conditional arguments 
-    parser.add_argument("--momentum", type=float, help="momentum averaging parameter for MatrixSSL with asymmetric networks. required if alg set to mssl_a, must be in [0, 1]")
-    # parser.add_argument("--hidden_dim", type=int, default=20, help="dimension of hidden layer in predictor network for MatrixSSL with assymetric networks. required if alg set to mssl_a")
+    parser.add_argument("--momentum", type=float, default=argparse.SUPPRESS, help="momentum averaging parameter for MatrixSSL with asymmetric networks. required if alg set to mssla, must be in [0, 1]")
+    # parser.add_argument("--hidden_dim", type=int, default=20, help="dimension of hidden layer in predictor network for MatrixSSL with assymetric networks. required if alg set to mssla")
+    parser.add_argument("--tau_max", type=float, default=argparse.SUPPRESS, help="specifies bounds for uniformly sampling tau from [-tau_max, tau_max] when aug='corr'. must be >0")
+    conditional_args = ['momentum', 'tau_max']
 
     # Saving/loading
     parser.add_argument("--save_dir", type=str, required=False, help="directory to save model weights/run details to")
 
     args = parser.parse_args()
-    return args
+
+    # Set conditional arguments to their defaults, if the conditions requiring them are satisfied and if they are not already provided
+    for carg in conditional_args:
+        if carg not in args:
+            conditional_arg_default(carg, args, set_inplace=True)
+
+    return parser, args, conditional_args
 
 
 def fit_classifier(linear, backbone, valloader, clf_loss_fn, clf_optim, device, clf_epochs=None):
@@ -94,36 +122,68 @@ def fit_classifier(linear, backbone, valloader, clf_loss_fn, clf_optim, device, 
         clf_acc = correct_count / total_count
     return clf_acc
 
-def generate_filepath(save_path:str, num):
+def generate_runpath(save_path:str, num=1):
     """
-    Given directory path to save to, returns a compatible path name that doesn't override existing run log files
+    Given directory path to save to, returns a compatible subdirectory name for the run that doesn't override existing run directories
 
-    save_path: path to save file to, without "_run#" appended
-    returns: save_path with compatible "_run#" string appended
+    save_path: path to save directory to, without "_run#" appended
+    returns: save_path with "_run#" appended
     """
     candidate_path = save_path + "_run" + str(num)
-    if os.path.isfile(candidate_path):
+    if os.path.isdir(candidate_path):
         num += 1
-        return generate_filepath(save_path, num)
+        return generate_runpath(save_path, num)
     else:
         return candidate_path
 
 
 def main():
-    args = parse_args()
+    parser, args, cargs = parse_args()
+
+    # handle required model level hyperparams and non-default-valued params with for creating run (directory) name
+    runname_arg_list = []
+    for arg_name, arg_value in vars(args).items():
+        if arg_name in ["alg", "backbone", "optim"]: # handle model arguments
+            runname_arg_list.append(str(arg_value))
+            continue
+        if arg_name in cargs: # handle non-default conditional arguments
+            if arg_value != conditional_arg_default(arg_name, args, set_inplace=False):
+                runname_arg_list.append(f'{arg_name}={arg_value}')
+            continue
+        if (parser.get_default(arg_name) is not None) and (arg_value != parser.get_default(arg_name)):
+            runname_arg_list.append(f'{arg_name}={arg_value}') # handle all other non-default args
+
+    # create list of 'essential arguments' - required task relevant hparams (besides label), required model hparams, any non-default arguments, and any optional arguments, if provided. for data visualization
+    essential_args = []
+    essential_args.extend([args.nat, args.aug])
+    essential_args.extend(runname_arg_list)
     
     # handle save directory and saved file name
-    if args.save_dir is not None:
-        save_dir = args.save_dir if os.path.isdir(args.save_dir) else os.makdirs(args.save_dir)
-    else: # save to default: outputs folder
+    # runs are organized in a hierarchy: first by learning task settings (natural, augmentation, labelling schemes), then at the by model hyperparameters (alg, backbone, optim, emb_d etc.). each run has its own directory.
+    if args.save_dir is not None: # save_dir refers to the directory to contain the directory for the run (run_dir)
+        if not os.path.isdir(args.save_dir):
+            os.makedirs(args.save_dir)
+        save_dir = args.save_dir
+    else: # default is ./outputs
         save_dir = './outputs'
-    # file name without "_run#" appended
-    filename_prefix = "_".join([f'{args.alg}', f'{args.backbone}', f'{args.optim}', f'embd={args.emb_dim}', f'augment={args.augmentation}', f'epochs={args.epochs}', f'bs={args.bs}', f'lr={args.lr}', f'wd={args.wd}'])
-    # append "_run#" at end (start with 1 for first file)
-    save_path = generate_filepath(os.path.join(save_dir, filename_prefix), 1)
+    # save to folder specified by natural, augmentation, label settings
+    run_dir = os.path.join(save_dir, "_".join([str(args.nat), str(args.aug), str(args.label)]))
+    # if not os.path.isdir(save_dir):
+    #     os.makedirs(save_dir)
+    # run name without "_run#" appended
+    runname_prefix = "_".join(runname_arg_list)
+    # append "_run#" at end (start with 1 for first run)
+    run_path = generate_runpath(os.path.join(run_dir, runname_prefix), 1)
+    os.makedirs(run_path)
 
+    # forbid inconsistent data generating parameters
+    if args.aug == 'mult' and args.label != 'weights':
+        raise Exception("'mult' augmentation scheme must be used with 'weights' labeling")
     # generate data
-    data_dict = generate_cube_data(args.n, args.v, args.d, args.k, args.augmentation)
+    tau_max = None
+    if args.aug == 'corr':
+        tau_max = args.tau_max
+    data_dict = generate_cube_data(args.n, args.v, args.d, args.k, args.nat, args.aug, args.label, tau_max)
     (x1, x2, y), (val_x, val_y) = data_dict['train'], data_dict['val']
 
     # create dataloader
@@ -152,14 +212,14 @@ def main():
     # ssl_model refers to both the backbone and the SSL algorithm/task used to train it
     if args.alg == "spectral":
         ssl_model = Spectral(backbone=backbone, emb_dim=emb_d)
-    elif args.alg == "mssl_a":
-        if args.momentum is None or (not (0 <= args.momentum <= 1)):
+    elif args.alg == "mssla":
+        if (not (0 <= args.momentum <= 1)):
             raise Exception("Momentum averaging parameter must be set to a value within [0, 1] for asymmetric MatrixSSL")
         ssl_model = MatrixSSL(backbone=backbone, emb_dim=emb_d, asym=True, momentum=args.momentum)
-    elif args.alg == "mssl_s":
+    elif args.alg == "mssls":
         ssl_model = MatrixSSL(backbone=backbone, emb_dim=emb_d, asym=False)
     else:
-        raise Exception("Invalid argument 'alg', must be one of {'spectral', 'mssl_a', 'mssl_s'}")
+        raise Exception("Invalid argument 'alg', must be one of {'spectral', 'mssla', 'mssls'}")
     # send model to device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ssl_model = ssl_model.to(device)
@@ -180,13 +240,31 @@ def main():
 
     # Training loop. See ssl_model class for specific forward passes
     for epoch in range(epochs):
+        print(f"Epochs {epoch}")
         start_time = time.time()
+
+        # # debugging printing (part 1)
+        # print("PRIOR TO EPOCH TRAINING")
+        # print("Online backbone")
+        # for name, param in ssl_model.online_backbone.named_parameters():
+        #     print(name, param.requires_grad)
+        # print("Target backbone")
+        # for name, param in ssl_model.target_backbone.named_parameters():
+        #     print(name, param.requires_grad)
 
         # UPDATE WEIGHTS OF ONLINE NETWORK
         ssl_model.train()
         # listen to gradient calculations for online network
         for param in ssl_model.online.parameters():
             param.requires_grad = True
+
+        # print("INSIDE EPOCH, BEFORE LOOP")
+        # print("Online backbone")
+        # for name, param in ssl_model.online_backbone.named_parameters():
+        #     print(name, param.requires_grad)
+        # print("Target backbone")
+        # for name, param in ssl_model.target_backbone.named_parameters():
+        #     print(name, param.requires_grad)
 
         for idx, (x1, x2) in enumerate(trainloader):
             x1, x2 = x1.to(device), x2.to(device)
@@ -216,39 +294,55 @@ def main():
                     for online_param, target_param in zip(ssl_model.online.parameters(), ssl_model.target.parameters()):
                         target_param.mul_(args.momentum).add_((1-args.momentum) * online_param)
         
-        # EVALUATE DOWNSTREAM LIN CLF PERFORMANCE AT END OF EACH EPOCH
-        ssl_model.eval()
-        # stop calculating gradients for backbone in online network
-        for param in ssl_model.online_backbone.parameters():
-            param.requires_grad = False
+        # every 20 epochs, save model weights. include time of save.
+        if (epoch + 1) % 20 == 0:
+            current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            torch.save(ssl_model.online_backbone.state_dict(), os.path.join(run_path, f"model_weights_{current_time}"))
+        
+    
+        # # debugging printing (part )
+        # print("POST EPOCH TRAINING")
+        # print("Online backbone")
+        # for name, param in ssl_model.online_backbone.named_parameters():
+        #     print(name, param.requires_grad)
+        # print("Target backbone")
+        # for name, param in ssl_model.target_backbone.named_parameters():
+        #     print(name, param.requires_grad)
 
-        # instantiate linear classifier
-        linear = nn.Linear(ssl_model.emb_dim, 1).to(device)
-        # fit linear classifier, print classification accuracy on validation set
-        clf_acc = fit_classifier(
-            linear,
-            ssl_model.online_backbone,
-            valloader,
-            nn.BCELoss(),
-            optim.SGD(linear.parameters(), lr=0.1, momentum=0.9),
-            device=device
-            )
-        del linear
-        print(f'Epoch {epoch+1} classification accuracy: {clf_acc}')
-        val_accs.append(clf_acc)
+        # EVALUATE DOWNSTREAM LIN CLF PERFORMANCE AT END OF EACH EPOCH
+        # ssl_model.eval()
+        # # stop calculating gradients for backbone in online network
+        # for param in ssl_model.online_backbone.parameters():
+        #     param.requires_grad = False
+
+        # # instantiate linear classifier
+        # linear = nn.Linear(ssl_model.emb_dim, 1).to(device)
+        # # fit linear classifier, print classification accuracy on validation set
+        # clf_acc = fit_classifier(
+        #     linear,
+        #     ssl_model.online_backbone,
+        #     valloader,
+        #     nn.BCELoss(),
+        #     optim.SGD(linear.parameters(), lr=0.1, momentum=0.9),
+        #     device=device
+        #     )
+        # del linear
+        # print(f'Epoch {epoch+1} classification accuracy: {clf_acc}')
+        # val_accs.append(clf_acc)
         end_time = time.time()
         print(f'Epoch time: {end_time - start_time}')
 
-    # store model weights, trainval+true_w data, batch_size (for recreating dataloader), optimizer to save_path 
+    # store final model weights, data, args, metrics run_path 
     run_dict = {
         "model_weights":ssl_model.online_backbone.state_dict(),
         "data": data_dict, # train, validation data
         "optim": args.optim,
         "args": args,
+        "essential_args": essential_args,
         "val_accs":val_accs,
         "train_losses":train_losses
     }
-    torch.save(run_dict, save_path)
+    torch.save(run_dict, os.path.join(run_path, 'run_dict'))
 
 
 if __name__ == '__main__':
