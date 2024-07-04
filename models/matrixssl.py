@@ -187,12 +187,21 @@ class MatrixSSL(nn.Module):
             with torch.no_grad():
                 p1, p2 = self.target(x1), self.target(x2)
             # loss, d_dict = symmetrized_mssl_loss(p1,p2,z1,z2, self.gamma)
+
+            # they use default (args) values: lambda=0.5, mu=0.5, all others match mce_loss_func defaults (identical to our implementation)
+            # our current defaults are set to lambda=1, mu=1
             loss = (
-                    mce_loss_func(p2.T, z1.T, correlation=True)
-                    + mce_loss_func(p1.T, z2.T, correlation=True)
-                    + self.gamma * mce_loss_func(p2.T, z1.T, correlation=False)
-                    + self.gamma * mce_loss_func(p1.T, z2.T, correlation=False)
-                    ) * 0.5
+                mce_loss_func(p2, z1, correlation=True) +
+                mce_loss_func(p1, z2, correlation=True) +
+                self.gamma * mce_loss_func(p2, z1, correlation=False) +
+                self.gamma * mce_loss_func(p1, z2, correlation=False)
+                ) * 0.5            
+            # loss = (
+            #         mce_loss_func(p2.T, z1.T, correlation=True)
+            #         + mce_loss_func(p1.T, z2.T, correlation=True)
+            #         + self.gamma * mce_loss_func(p2.T, z1.T, correlation=False)
+            #         + self.gamma * mce_loss_func(p1.T, z2.T, correlation=False)
+            #         ) * 0.5
             return {'loss': loss, 'd_dict': []} #d_dict}
         else: # worry about this later..
             # f = self.encoder

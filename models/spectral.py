@@ -8,7 +8,10 @@ from torchvision.models import resnet50
 # %%
 def D(z1, z2, mu=1.0):
     """
-    Spectral Contrastive Loss (implementation from HaoChen et. al.)
+    Spectral Contrastive Loss (implementation from HaoChen et. al).
+    The terms in this implementation most directly correspond to the original Spectral Contrastive Loss. 
+    loss_part1 = -2 E_{(x, x+) ~ p+}[f(x)^T f(x+)], while
+    loss_part2 = E_{x, x^- ~iid p_d}[(f(x)^T f(x-))^2]
     """
     # mask for if ith row has 2-norm less than mu=1.0
     mask1 = (torch.norm(z1, p=2, dim=1) < np.sqrt(mu)).float().unsqueeze(1)
