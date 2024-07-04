@@ -220,30 +220,33 @@ def main():
     os.makedirs(run_path)
 
     # generate data
-    tau_max = None
-    if args.aug == 'corr':
-        tau_max = args.tau_max
-    data_dict = generate_cube_data(args.n, args.v, args.d, args.k, args.nat, args.aug, args.label, tau_max)
-    (x1, x2, y), (val_x, val_y) = data_dict['train'], data_dict['val']
+    if args.aug == 'normal': # normal correlated augmentations
+        data_dict = generate_correlated_normal_augs(args.n, args.num_feats, args.feat_dim)
+    else: # use natural-augmentation cube data procedure for data
+        tau_max = None
+        if args.aug == 'corr':
+            tau_max = args.tau_max 
+        data_dict = generate_cube_augs(args.n, args.d, args.k, args.nat, args.aug, tau_max)
+    x1, x2 = data_dict["train"]
 
     # create dataloader
-    trainset, valset = TensorDataset(x1, x2), TensorDataset(val_x, val_y)
+    trainset = TensorDataset(x1, x2)
     trainloader = DataLoader(trainset, batch_size=args.bs)
-    valloader = DataLoader(valset, batch_size=args.bs)
 
-    print(f'Train Loader length: {len(trainloader)}, Val Loader length: {len(valloader)}')
+    print(f'Train Loader length: {len(trainloader)}')
 
     # define embedding dimension
     emb_d = args.emb_dim
 
     # initialize backbone, using embedding dimension determined above
+    in_dim = args.d if hasattr(args, 'd') else args.feat_dim * args.num_feats
     if args.backbone == "linear":          
-        backbone = nn.Linear(args.d, emb_d)
+        backbone = nn.Linear(in_dim, emb_d)
     elif args.backbone == "mlp":
         backbone = nn.Sequential(
-            nn.Linear(args.d, 2*args.d),
+            nn.Linear(in_dim, 2*in_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(2*args.d, emb_d)
+            nn.Linear(2*in_dim, emb_d)
             )
     else:
         raise Exception("Invalid argument 'backbone', expected one of {'linear', 'mlp'}")
@@ -266,90 +269,77 @@ def main():
 
     # define optimizer
     if args.optim == "sgd":
-        opt = optim.SGD(ssl_model.parameters(), lr=args.lr, weight_decay=args.wd)
+        opt = optim.SGD(ssl_model.parameters(), lr=args.lr, weight_decay=args.wd, momentum=args.sgd_momentum)
     elif args.optim == "adam":
         opt = optim.Adam(ssl_model.parameters(), lr=args.lr, weight_decay=args.wd)
     else:
         raise Exception("Invalid argument 'optim', must be one of {'sgd', 'adam'}")
+
+    # define learning rate scheduler (if any)
+    scheduler = None
+    if hasattr(args, 'sched'):
+        if args.sched == 'step':
+            scheduler = StepLR(opt, step_size=30, gamma=0.1)
+    # TODO: ############################################################################
     
     epochs = args.epochs
 
-    # linear classification loss on the validation set
-    val_accs = []
+    # SET UP LOGGING
     train_losses = []
+    gradient_norms = {}
+    # for now, listen to only the gradient norms of the weight and bias of the embedding function (linear)
+    gradient_norm_parts = ['weight', 'bias']
+    # initialize empty lists for each part of gradient norm to log throughout train loop
+    for part in gradient_norm_parts:
+        gradient_norms[part] = []
 
-    # Training loop. See ssl_model class for specific forward passes
+    # TRAINING LOOP - See ssl_model class for specific forward passes
     for epoch in range(epochs):
         print(f"Epochs {epoch}")
         start_time = time.time()
 
-        # # debugging printing (part 1)
-        # print("PRIOR TO EPOCH TRAINING")
-        # print("Online backbone")
-        # for name, param in ssl_model.online_backbone.named_parameters():
-        #     print(name, param.requires_grad)
-        # print("Target backbone")
-        # for name, param in ssl_model.target_backbone.named_parameters():
-        #     print(name, param.requires_grad)
-
-        # UPDATE WEIGHTS OF ONLINE NETWORK
         ssl_model.train()
         # listen to gradient calculations for online network
         for param in ssl_model.online.parameters():
             param.requires_grad = True
 
-        # print("INSIDE EPOCH, BEFORE LOOP")
-        # print("Online backbone")
-        # for name, param in ssl_model.online_backbone.named_parameters():
-        #     print(name, param.requires_grad)
-        # print("Target backbone")
-        # for name, param in ssl_model.target_backbone.named_parameters():
-        #     print(name, param.requires_grad)
-
+        # inner training loop
         for idx, (x1, x2) in enumerate(trainloader):
             x1, x2 = x1.to(device), x2.to(device)
             opt.zero_grad()
             # run forward() on ssl_model, which is expected to return a SSL loss on x1, x2
             # the forward function is specific to each SSL algorithm (Spectral, MatrixSSL, etc.)
             loss = ssl_model(x1, x2)['loss']
-
-            # store training loss with each training iteration
+            # log training loss for each train step
             train_losses.append(loss.item())
-
             # backprop
             loss.backward()
+            # calculate and log gradient norms
+            for name, param in ssl_model.online_backbone.named_parameters():
+                if param.grad is not None:
+                    gradient_norm = torch.norm(param.grad)
+                    gradient_norms[name].append(gradient_norm.item())
             del loss, x1, x2
             # update weights
             opt.step()
-            
-            # if idx == len(trainloader) - 2:
-            #     for name, param in ssl_model.named_parameters():
-            #         print(name, param.grad)
-
-            # Momentum averaging for mssl with asymmetric networks
+            # momentum averaging for mssl with asymmetric networks
             if getattr(ssl_model, "asym", False):
                 with torch.no_grad():
                     # terminates at end of shortest iterator, excludes predictor weights
                     # need to ensure backbone and projector networks the same   
                     for online_param, target_param in zip(ssl_model.online.parameters(), ssl_model.target.parameters()):
                         target_param.mul_(args.momentum).add_((1-args.momentum) * online_param)
-        
+
+        # update learning rate as necessary
+        if scheduler is not None:
+            scheduler.step()
         # every 20 epochs, save model weights. include time of save.
         if (epoch + 1) % 20 == 0:
             current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             torch.save(ssl_model.online_backbone.state_dict(), os.path.join(run_path, f"model_weights_{current_time}"))
-        
-    
-        # # debugging printing (part )
-        # print("POST EPOCH TRAINING")
-        # print("Online backbone")
-        # for name, param in ssl_model.online_backbone.named_parameters():
-        #     print(name, param.requires_grad)
-        # print("Target backbone")
-        # for name, param in ssl_model.target_backbone.named_parameters():
-        #     print(name, param.requires_grad)
 
-        # EVALUATE DOWNSTREAM LIN CLF PERFORMANCE AT END OF EACH EPOCH
+        # EVALUATE DOWNSTREAM LIN CLF PERFORMANCE AT END OF EACH EPOCH 
+        # ######### (NO LONGER WORKS, SINCE REMOVED VALIDATION SPLIT) ##############
         # ssl_model.eval()
         # # stop calculating gradients for backbone in online network
         # for param in ssl_model.online_backbone.parameters():
@@ -369,18 +359,19 @@ def main():
         # del linear
         # print(f'Epoch {epoch+1} classification accuracy: {clf_acc}')
         # val_accs.append(clf_acc)
+
         end_time = time.time()
         print(f'Epoch time: {end_time - start_time}')
 
     # store final model weights, data, args, metrics run_path 
     run_dict = {
         "model_weights":ssl_model.online_backbone.state_dict(),
-        "data": data_dict, # train, validation data
+        "data": data_dict,
         "optim": args.optim,
         "args": args,
         "essential_args": essential_args,
-        "val_accs":val_accs,
-        "train_losses":train_losses
+        "train_losses":train_losses,
+        "gradient_norms":gradient_norms
     }
     torch.save(run_dict, os.path.join(run_path, 'run_dict'))
 
