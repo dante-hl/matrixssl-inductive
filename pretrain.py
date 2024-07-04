@@ -165,47 +165,60 @@ def generate_runpath(save_path:str, num=1):
 
 
 def main():
-    parser, args, cargs = parse_args()
+    parser, args, cargs, xargs = parse_args()
 
-    # handle required model level hyperparams and non-default-valued params with for creating run (directory) name
-    runname_arg_list = []
+    # forbid inconsistent arguments
+    if hasattr(args, 'nat'):
+        if (args.nat is not None) and args.aug == 'normal':
+            raise Exception("'normal' augmentation scheme doesn't use natural data")
+        if (args.nat is None) and (args.aug == 'mult' or args.aug == 'add' or args.aug == 'corr'):
+            raise Exception("natural data should be specified if using 'mult', 'add', or 'args' augmentations")
+
+    # Run data are organized in a hierarchy: at the top level, runs are organized by the setting of the SSL learning task (natural if not None, augmentation), then at the run level, where each run has its own directory, organized by hyperparameters in the run (alg, backbone, optim, emb_d etc.)
+
+    # Thus, only SSL learning task arguments are included in the top level directories, while only run relevant arguments are included in the run level directories
+
+    # CREATE LIST OF ARGS TO INCLUDE IN RUN (directory) NAME
+    runname_args = []
     for arg_name, arg_value in vars(args).items():
-        if arg_name in ["alg", "backbone", "optim"]: # handle model arguments
-            runname_arg_list.append(str(arg_value))
+        # always include alg, backbone, optim params
+        if arg_name in ["alg", "backbone", "optim"]: 
+            runname_args.append(str(arg_value))
             continue
-        if arg_name in cargs: # handle non-default conditional arguments
-            if arg_value != conditional_arg_default(arg_name, args, set_inplace=False):
-                runname_arg_list.append(f'{arg_name}={arg_value}')
+        # include conditional arguments with non-default values in directory name. 
+        if arg_name in cargs: 
+            if (arg_name not in xargs) and (arg_value != conditional_arg_default(arg_name, args, set_inplace=False)):
+                runname_args.append(f'{arg_name}={arg_value}')
             continue
-        if (parser.get_default(arg_name) is not None) and (arg_value != parser.get_default(arg_name)):
-            runname_arg_list.append(f'{arg_name}={arg_value}') # handle all other non-default args
+        # include all other args with non-default values in directory name.
+        if (arg_name not in xargs) and (arg_value != parser.get_default(arg_name)):
+            runname_args.append(f'{arg_name}={arg_value}')
 
-    # create list of 'essential arguments' - required task relevant hparams (besides label), required model hparams, any non-default arguments, and any optional arguments, if provided. for data visualization
+    # create list of 'essential arguments' - required task relevant hparams, required model hparams, any non-default arguments, and any optional arguments, if provided. for data visualization
     essential_args = []
-    essential_args.extend([args.nat, args.aug])
-    essential_args.extend(runname_arg_list)
+    task_args = [getattr(args, attr) for attr in ['nat', 'aug'] if hasattr(args, attr)]
+    essential_args.extend(task_args)
+    essential_args.extend(runname_args)
     
-    # handle save directory and saved file name
-    # runs are organized in a hierarchy: first by learning task settings (natural, augmentation, labelling schemes), then at the by model hyperparameters (alg, backbone, optim, emb_d etc.). each run has its own directory.
-    if args.save_dir is not None: # save_dir refers to the directory to contain the directory for the run (run_dir)
+    # CREATE SAVE DIRECTORY + PARENT (SSL task level) DIRECTORY (if needed) + RUN DIRECTORY
+
+    # save_dir gives the option to create an even higher level folder to store directories containing runs. this may be helpful for when you want to more easily identify the outputs of specific scripts.
+    if args.save_dir is not None: 
         if not os.path.isdir(args.save_dir):
             os.makedirs(args.save_dir)
         save_dir = args.save_dir
     else: # default is ./outputs
         save_dir = './outputs'
-    # save to folder specified by natural, augmentation, label settings
-    run_dir = os.path.join(save_dir, "_".join([str(args.nat), str(args.aug), str(args.label)]))
+    # save to folder specified by natural, augmentation settings
+    run_dir = os.path.join(save_dir, "_".join(task_args))
     # if not os.path.isdir(save_dir):
     #     os.makedirs(save_dir)
     # run name without "_run#" appended
-    runname_prefix = "_".join(runname_arg_list)
+    runname_prefix = "_".join(runname_args)
     # append "_run#" at end (start with 1 for first run)
     run_path = generate_runpath(os.path.join(run_dir, runname_prefix), 1)
     os.makedirs(run_path)
 
-    # forbid inconsistent data generating parameters
-    if args.aug == 'mult' and args.label != 'weights':
-        raise Exception("'mult' augmentation scheme must be used with 'weights' labeling")
     # generate data
     tau_max = None
     if args.aug == 'corr':
