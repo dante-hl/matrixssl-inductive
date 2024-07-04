@@ -4,12 +4,13 @@
 import os
 os.chdir(os.path.dirname(__file__))
 from datetime import datetime
-from data.loader import generate_cube_data
+from data.loader import generate_cube_augs, generate_correlated_normal_augs
 # %%
 import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import StepLR
 import time
 
 from torch.utils.data import TensorDataset, DataLoader
@@ -20,22 +21,41 @@ from models import Spectral, MatrixSSL
 
 def conditional_arg_default(carg_name, args, set_inplace):
     """
-    Set default value for input conditional argument name, if needed
+    Checks if the conditional argument's default value exists. If it does, set the  default value in `args` or return the default value, depending on `set_inplace`. If the conditional argument's default value doesn't exist, function always returns None.
 
     carg_name: name of conditional argument
+    set_inplace: (when the default value exists,) specifies whether to set the conditional argument to its default value in args, or whether to just return the default value
     """
     default_val = None
+    nat_aug_defaults = {'d':25, 'k':5} # dict of cargs and default values for args in natural-augmentation data generating procedure
+    corr_normal_aug_defaults = {'num_feats':5, 'feat_dim':5} # ditto for args in correlated normal augmentations generating procedure
+    # general args
     if carg_name == 'momentum':
         if args.alg == 'mssla' or args.alg == 'mssls': # momentum required for mssl
             default_val = 0.9
+    if carg_name == 'sgd_momentum':
+        if args.optim == 'sgd': # sgd_momentum required for sgd
+            default_val = 0.9
+    # nat-aug args
+    if carg_name in nat_aug_defaults:
+        if args.aug == 'mult' or args.aug == 'add' or args.aug == 'corr':
+            default_val = nat_aug_defaults[carg_name]
     if carg_name == 'tau_max':
         if args.aug == 'corr': # lower and upper bound for uniform sampling of tau needed for aug=corr
             default_val = 1
-    if default_val is not None:
-        if set_inplace:
+    # corr-normal args
+    if carg_name in corr_normal_aug_defaults:
+        if args.aug == 'normal':
+            default_val = corr_normal_aug_defaults[carg_name]
+    
+    if default_val is not None: # if conditional arg has a default value
+        if set_inplace: # set carg to default value in args
             setattr(args, carg_name, default_val)
             return
-    return default_val # if getting default, return None if args don't satisfy conditions, or return default value if they do
+        else: # otherwise return the default value
+            return default_val
+    else:
+        return None # for conditional args that don't have default values (i.e nat)
     
 
 def parse_args():
@@ -48,39 +68,46 @@ def parse_args():
     parser.add_argument("--optim", type=str, required=True, help="optimizer, one of {'sgd', 'adam'}")
     parser.add_argument("--emb_dim", type=int, default=10, help="embedding dimension")
 
-    # Data generation arguments
-    parser.add_argument("--nat", type=str, required=True, help="specifies natural data sampling scheme, one of {'bool', 'unif'}; see generate_cube_data function in ./data/loader.py for more information")
-    parser.add_argument("--aug", type=str, required=True, help="specifies augmentation scheme, one of {'mult', 'add'}. see generate_cube_data function in ./data/loader.py for more information")
-    parser.add_argument("--label", type=str, required=True, help="specifies labeling scheme. see generate_cube_data function in ./data/loader.py for more information")
-
-    parser.add_argument("-n", type=int, default=(2 ** 16) + 12500, help="number of data points")
-    parser.add_argument("-v", type=int, default=12500, help="size of validation set, input some v<n")
-    parser.add_argument("-d", type=int, default=25, help="dimension of data")
-    parser.add_argument("-k", type=int, default=5, help="number invariant dimensions")
+    # Universal data generation arguments
+    parser.add_argument("-n", type=int, default=(2 ** 16), help="number of data points")
+    parser.add_argument("--aug", type=str, required=True, help="specifies augmentation scheme, one of {'mult', 'add', 'corr', 'normal'}. see generate_cube_data function in ./data/loader.py for more information")
 
     # Other training arguments
     parser.add_argument("--epochs", type=int, default=100, help="number training epochs")
     parser.add_argument("--bs", type=int, default=256, help="training minibatch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="optimizer learning rate hyperparam")
     parser.add_argument("--wd", type=float, default=1e-5, help="optimizer weight decay hyperparam")
+    parser.add_argument("--sched", type=str, help="learning rate scheduler")
 
-    # Conditional arguments 
+    # CONDITIONAL ARGUMENTS (everything below are conditional arguments in some way)
     parser.add_argument("--momentum", type=float, default=argparse.SUPPRESS, help="momentum averaging parameter for MatrixSSL with asymmetric networks. required if alg set to mssla, must be in [0, 1]")
+    parser.add_argument("--sgd_momentum", type=float, default=argparse.SUPPRESS, help="SGD momentum parameter")
     # parser.add_argument("--hidden_dim", type=int, default=20, help="dimension of hidden layer in predictor network for MatrixSSL with assymetric networks. required if alg set to mssla")
+
+    # Natural -> Augmentation Data Generation Parameters (for if aug = mult, add, corr)
+    parser.add_argument("--nat", type=str, default=argparse.SUPPRESS, help="specifies natural data sampling scheme, one of {'bool', 'unif'}; see generate_cube_data function in ./data/loader.py for more information")
+    parser.add_argument("-d", type=int, default=argparse.SUPPRESS, help="dimension of data")
+    parser.add_argument("-k", type=int, default=argparse.SUPPRESS, help="denotes first k dimensions, which may be augmented or unaugmented, depending on the augment scheme")
     parser.add_argument("--tau_max", type=float, default=argparse.SUPPRESS, help="specifies bounds for uniformly sampling tau from [-tau_max, tau_max] when aug='corr'. must be >0")
-    conditional_args = ['momentum', 'tau_max']
+
+    # Correlated Normal Data Generation Parameters (for if aug = normal)
+    parser.add_argument("--num_feats", type=int, default=argparse.SUPPRESS, help="number of features in normal augmentation scheme")
+    parser.add_argument("--feat_dim", type=int, default=argparse.SUPPRESS, help="dimension of each feature in normal augmentation scheme")
 
     # Saving/loading
     parser.add_argument("--save_dir", type=str, required=False, help="directory to save model weights/run details to")
 
+    conditional_args = ['momentum', 'sgd_momentum', 'nat', 'd', 'k', 'tau_max', 'num_feats', 'feat_dim']
+    exclude_from_runname_args = ['alg', 'backbone', 'optim', 'nat', 'save_dir']
+
     args = parser.parse_args()
 
-    # Set conditional arguments to their defaults, if the conditions requiring them are satisfied and if they are not already provided
+    # Set conditional arguments to their defaults, if their input values are not already provided and if the conditions requiring them are satisfied
     for carg in conditional_args:
         if carg not in args:
             conditional_arg_default(carg, args, set_inplace=True)
 
-    return parser, args, conditional_args
+    return parser, args, conditional_args, exclude_from_runname_args
 
 
 def fit_classifier(linear, backbone, valloader, clf_loss_fn, clf_optim, device, clf_epochs=None):
