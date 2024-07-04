@@ -7,74 +7,52 @@ import numpy as np
 import matplotlib.pyplot as plt
 # %%
 
-def plot_metrics(dirs, toplot, aggregate=True, plotall=False):
+def plot_metrics(dirs, toplot='train_losses', aggregate=True, plotall=False):
     """
     Plots specified metric of a single run or of multiple runs. 
     Each directory in dirs expects a path to the exact run directory.
+
+    toplot specifies metric to be plotted. includes {'train_losses', 'gradient_norms'}
     """
-    metrics_list = []
+    metrics_dict = {}
+    title_append = None
+    # create empty lists for each metric. these will contain series from each run.
+    if toplot == 'train_losses':
+        metrics_dict[toplot] = []
+    elif toplot == 'gradient_norms':
+        metrics_dict['weight'] = []
+        metrics_dict['bias'] = []
+        title_append = "gradient norms"
+    # for the specified metric, add each run's series to its corresponding list
     for dir in dirs:
         run_dict = torch.load(os.path.join(dir, 'run_dict'))
-        metrics = run_dict[toplot]
-        metrics_list.append(metrics)
-    metrics_np = np.asarray(metrics_list)
-    plt.figure()
-    if aggregate:
-        avgs = metrics_np.mean(axis=0)
-        stds = metrics_np.std(axis=0)
-        x = [i for i in range(len(avgs))]
-        plt.plot(x, avgs, 'k', label='average')
-        plt.fill_between(x, avgs-stds, avgs+stds,
-            alpha=0.2, facecolor='#089FFF',
-            linewidth=4, antialiased=True)
-    if plotall:
-        for series, run_name in zip(metrics_list, dirs):
-            plt.plot(series, label=run_name)
-
-
-
-def filter_and_plot(filterlist, to_plot, dir='./outputs', aggregate=True, plotall=False, **kwargs):
-    """
-    Filters from files in a directory, and plots their metrics in a single axes
-    """
-    dicts = []
-    filenames = []
-    for file in os.listdir(dir):
-        if all(word in file for word in filterlist):
-            d = torch.load(os.path.join(dir, file))
-            dicts.append(d)
-            filenames.append(file)
-    values = [d[to_plot] for d in dicts]
+        if toplot == 'train_losses':
+            metrics_dict[toplot].append(run_dict[toplot])
+        elif toplot == 'gradient_norms':
+            metrics_dict['weight'].append(run_dict[toplot]['weight'])
+            metrics_dict['bias'].append(run_dict[toplot]['bias'])
+        # metrics = run_dict[toplot]
+        # metrics_list.append(metrics)
     
-    plt.figure()
-    if aggregate:
-        values_np = np.asarray(values)
-        avgs = values_np.mean(axis=0)
-        stds = values_np.std(axis=0)
-        x = [i for i in range(len(avgs))]
-        plt.figure()
-        plt.plot(x, avgs, 'k', label='average')
-        plt.fill_between(x, avgs-stds, avgs+stds,
-            alpha=0.2, facecolor='#089FFF',
-            linewidth=4, antialiased=True)
-    
-    if plotall:
-        for series, filename in zip(values, filenames):
-            plt.plot(series, label=filename)
-
-    if to_plot == 'val_accs':
-        plt.ylim(0.5, 1)
-        plt.ylabel('Classification Accuracy')
-        plt.xlabel('Epochs')
-    elif to_plot == 'train_losses':
-        plt.ylabel('Train Loss')
-        plt.xlabel('Train Steps')
-
-    for key, val in kwargs.items():
-        if key == 'title':
-            plt.title(val)
-
-    plt.legend(bbox_to_anchor=[1, 0.5], loc='center left')
+    fig, ax = plt.subplots(1, len(metrics_dict))
+    ax = np.atleast_1d(ax)
+    for idx, key in enumerate(metrics_dict.keys()):
+        curr_ax = ax[idx]
+        metrics_lists = metrics_dict[key] # get list of series for specific metric
+        metrics_np = np.asarray(metrics_lists) # make into np array (one row per series)
+        if aggregate:
+            avgs = metrics_np.mean(axis=0)
+            stds = metrics_np.std(axis=0)
+            x = [i for i in range(len(avgs))]
+            curr_ax.plot(x, avgs, 'k', label='average')
+            curr_ax.fill_between(x, avgs-stds, avgs+stds,
+                alpha=0.2, facecolor='#089FFF',
+                linewidth=4, antialiased=True)
+        if plotall:
+            for series, run_name in zip(metrics_lists, dirs):
+                curr_ax.plot(series, label=run_name.split("_")[-1])
+            plt.legend(loc='upper right')
+        curr_ax.set_title(f"{key} {title_append}" if title_append is not None else key)
     plt.show()
             
 
@@ -96,13 +74,14 @@ def show_weights(names, single_dir=None, plot_weights=True, subtitle=True, title
             fig, ax = plt.subplots(1, figsize=(subplot_width, subplot_height), constrained_layout=True)
         else:
             fig, ax = plt.subplots(n_rows, n_cols, figsize=(subplot_width*n_cols, subplot_height*n_rows), constrained_layout=True)
+            ax = ax.flatten()
         if single_dir is None: # we are plotting final weights for one or more runs/directories
             for idx, run_dir in enumerate(names):
                 row = idx // 3
                 col = idx % 3
                 run_dict = torch.load(os.path.join(run_dir, 'run_dict'))
                 weights = run_dict['model_weights']
-                current_ax = ax if n_plots == 1 else ax[row, col]
+                current_ax = ax if n_plots == 1 else ax[idx]
                 im = current_ax.imshow(weights['weight'], cmap='hot', interpolation='nearest', vmin=-0.8, vmax=0.8)
                 if subtitle:
                     current_ax.set_title(f"run {idx+1}") # intended to be used for multiple runs within the same params
@@ -122,15 +101,14 @@ def show_weights(names, single_dir=None, plot_weights=True, subtitle=True, title
             fig.suptitle(title)
         # plt.subplots_adjust(hspace=0.1)
         # add colorbar
-        cbar_ax = ax if n_plots == 1 else ax[:, :]
-        fig.colorbar(im, ax=cbar_ax, location='bottom', orientation='horizontal')
         # Adjust the spacing between subplots to make room for the colorbar
         # fig.subplots_adjust(bottom=0.15)
-        for index in range(n_plots, n_rows * n_cols):
-            row = index // n_cols
-            col = index % n_cols
-            fig.delaxes(ax[row, col])
-        plt.show()
+        cbar_ax = ax #if n_plots == 1 else ax[:, :]
+        fig.colorbar(im, ax=cbar_ax, location='bottom', orientation='horizontal')
+        if n_plots != 1:
+            for index in range(n_plots, n_rows * n_cols):
+                fig.delaxes(ax[index])
+            plt.show()
     
 
 def plot_embeddings(dirs, toplot, diff=False, n=20, print_stats=True, subtitle=False):
@@ -165,7 +143,7 @@ def plot_embeddings(dirs, toplot, diff=False, n=20, print_stats=True, subtitle=F
         run_dict = torch.load(os.path.join(dir, 'run_dict'))
         weights = run_dict['model_weights']['weight']
         x1, x2 = run_dict['data']['train'][0], run_dict['data']['train'][1]
-        k = run_dict['args'].k # number of unaugmented dims, assumed all the same across all runs
+        args = run_dict["args"]
 
         weight_list.append(weights)
         x1_list.append(x1)
@@ -177,17 +155,19 @@ def plot_embeddings(dirs, toplot, diff=False, n=20, print_stats=True, subtitle=F
         subset1, subset2 = x1[indices], x2[indices]
         embeds1, embeds2 = subset1 @ weights.T, subset2 @ weights.T # direct embedding matrices, embeds are rows
         if idx == 0:
-            print(f"Norm of {n} rows of Z1 for run {idx+1}: {torch.norm(embeds1, dim=1)}")
+            print(f"Norm of {n} rows of Z1 for run {idx+1}: {torch.norm(embeds1, dim=1)}, average = {torch.mean(torch.norm(embeds1, dim=1)).item()}")
         embed_diffs = embeds1 - embeds2
         # calculate norms of differences in embeddings
         norm_diffs = torch.norm(embed_diffs, dim=1)
         embd_diff_norm_list.append(torch.mean(norm_diffs))
 
-        # calculate (normalized) contribution of augmented dimensions to norm
-        aug_dim_sq_norm = torch.norm(embed_diffs[:, k:], dim=1) ** 2
-        normalized_contrib = aug_dim_sq_norm / (norm_diffs ** 2)
-        # print(f"Normalized contributions of aug dimensions in {n} embeddings for run {idx+1}: {normalized_contrib}")
-        aug_contribution_list.append(torch.mean(normalized_contrib))
+        # calculate (normalized) contribution of augmented dimensions to norm, if data follows nat-aug procedure
+        if hasattr(args, 'k'):
+            k = args.k # number of unaugmented dims, assumed all the same across all runs
+            aug_dim_sq_norm = torch.norm(embed_diffs[:, k:], dim=1) ** 2
+            normalized_contrib = aug_dim_sq_norm / (norm_diffs ** 2)
+            # print(f"Normalized contributions of aug dimensions in {n} embeddings for run {idx+1}: {normalized_contrib}")
+            aug_contribution_list.append(torch.mean(normalized_contrib))
 
         # calculate covariance differences
         z1, z2 = x1 @ weights.T, x2 @ weights.T
@@ -247,7 +227,8 @@ def plot_embeddings(dirs, toplot, diff=False, n=20, print_stats=True, subtitle=F
         elif toplot == 'cov':
             norm_avg = sum(cov_diff_norm_list) / len(cov_diff_norm_list)
             print(f'Average Frobenius norm of differences in covariances ({n_plots} runs): {norm_avg}, embed dim = {cov_diff.shape[1]}')
-        print(f"Average normalized contribution to norm of augmented dimensions for each run: {aug_contribution_list}")
+        if hasattr(args, 'k'):
+            print(f"Average normalized contribution to norm of augmented dimensions for each run: {aug_contribution_list}")
 
     cbar_ax = ax if n_plots == 1 else ax[:]
     fig.colorbar(im, ax=cbar_ax, location='bottom', orientation='horizontal')
