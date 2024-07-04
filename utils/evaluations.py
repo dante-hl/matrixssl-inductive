@@ -102,3 +102,53 @@ def evaluate_classifiers(backbones, classifiers, test, test_labels, print_stats=
     
     avg_acc = sum(test_accs) / len(test_accs)
     return test_accs, avg_acc
+
+def evaluate_normal_downstream(dirs, n_val, n_test, gt_idx=0, plot_train=False, print_stats=False):
+    """
+    Given a list `dir` of run directories (presumed to be on 'normal' augmented data), evaluate the downstream performance of the learned representations by training a binary linear classifier on validation data, and testing classification accuracy on test data.
+
+    Natural/unagumented test/validation data is assumed to be distributed according to an isotropic normal with dimensions equal to the number of features * dimension of each feature. The label for test and validation is determined by a single feature indicated by `gt_idx`, which indexes the feature in gt_vecs list from the run's saved output.
+
+    `n_val`, `n_test` indicate how many points of validation/test data in the procedure described above.
+    """
+    test_scores = [] # downstream/test classification accuracy score for linear(emb_dim, 1) classifier fit onto validation data
+    for idx, dir in enumerate(dirs):
+        run_dict = torch.load(os.path.join(dir, 'run_dict'))
+        gt_vecs = run_dict['data']['gt_vecs']
+        d = gt_vecs[0].shape[0] # dimension of single feature
+        K = len(gt_vecs) # number of features
+        std_mvn = MultivariateNormal(torch.zeros(K*d), torch.eye(K*d))
+        # have label of any datum depend only on the gt feature given by gt_idx
+        label_vec = torch.zeros(K*d)
+        label_vec[gt_idx*d:(gt_idx+1)*d] = gt_vecs[gt_idx]
+        # Print true feature (that determines labels)
+        if print_stats:
+            print(f"Run {idx+1} label feature: {gt_vecs[gt_idx]}")
+        weights = run_dict['model_weights']['weight']
+        # Print weights corresponding to the labeling feature that have been learnt (to see if they are similar/well learnt)
+        # print(f"Run {idx+1} feature weights: {weights[gt_idx, gt_idx*d:(gt_idx+1)*d]}")
+        val_data = std_mvn.sample((n_val,))
+        val_y = (torch.sign(val_data @ label_vec) + 1)/2
+        test_data = std_mvn.sample((n_test,))
+        test_y = (torch.sign(test_data @ label_vec) + 1)/2
+        backbones, classifiers = fit_classifiers([dir], val_data, val_y, plot_train=plot_train)
+        _, avg_acc = evaluate_classifiers(backbones, classifiers, test_data, test_y, print_stats=print_stats)
+        test_scores.append(avg_acc) # since only one dir used
+    avg_score = sum(test_scores) / len(test_scores)
+    return test_scores, avg_score
+
+def get_feature_downstream_scores(dirs, plot_train=False, print_stats=False):
+    """
+    Calls evaluate_normal_downstream for all possible features that define the label, for all directories in `dirs`. Assumes all runs in dirs are run on data with the same number of features.
+
+    Returns an array of shape (len(dirs), num_features), where the (i, j)th entry denotes the downstream accuracy for run i, for downstream task based on feature j. Rows represent runs and columns represent features. A good representation should (at least) get good scores across the entire row.
+    """
+    run_dict = torch.load(os.path.join(dirs[0], 'run_dict'))
+    num_feats = run_dict['args'].num_feats
+    scores_array = np.zeros((len(dirs), num_feats)) # one row per run, one col per feature
+    for i in range(num_feats):
+        print(f"Feature {i+1}")
+        test_scores, _ = evaluate_normal_downstream(dirs, n_val=10000, n_test=10000, gt_idx=i, plot_train=plot_train, print_stats=print_stats)
+        test_scores_arr = np.array([score.item() for score in test_scores])
+        scores_array[:, i] = test_scores_arr
+    return scores_array
