@@ -1,5 +1,5 @@
 # matrixssl-inductive
-Benchmarking performance of MatrixSSL [1] and Spectral Contrastive Learning [2] across different simple learning tasks such as the boolean hypercube task from Saunshi et al. (2022) [3], and exploring the effect of inductive biases on different function classes on each method.
+Code to evaluate the downstream (linear classification) quality of linear representations learned by MatrixSSL [1] and Spectral Contrastive Learning [2] across various synthetic learning tasks such as the boolean hypercube task from Saunshi et al. (2022) [3]. This empirical work complements theoretical analyses on how the inductive biases of linear embedding functions affect representation quality.
 
 # References
 [1] Zhang, Y., Tan, Z., Yang, J., Huang, W., & Yuan, Y. (2023). Matrix Information Theory for Self-Supervised Learning (Version 5). arXiv. https://doi.org/10.48550/ARXIV.2305.17326
