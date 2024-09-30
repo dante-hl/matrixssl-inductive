@@ -2,6 +2,7 @@
 import torch
 import numpy as np
 from torch.distributions.multivariate_normal import MultivariateNormal
+from typing import List
 
 # %%
 def train_split(tuple_of_data, train_size):
@@ -225,4 +226,27 @@ def generate_correlated_normal_augs(n: int = (2 ** 16), num_feats:int=5, feat_di
     x2 = torch.hstack(x2_list)
     return {"train":(x1, x2), "alphas":alphas, "gt_vecs":gt_vecs, "gt_covs":gt_covs}
 
+
+def generate_mixture_gaussians(n: int, n_components:int, n_dim:int, gaussians:List[MultivariateNormal]=None):
+    if gaussians:
+        # check all gaussians have same shape
+        assert all(distr.event_shape == gaussians[0].event_shape for distr in gaussians)
+    else: # draw random means, standard covariance
+        mean_distr = MultivariateNormal(loc=torch.zeros(n_dim), covariance_matrix=torch.eye(n_dim))
+        gaussians = [MultivariateNormal(loc=mean_distr.sample(), covariance_matrix=torch.eye(n_dim)) for _ in range(n_components)]
+    x1, x2 = torch.zeros((n, gaussians[0].event_shape[0])), torch.zeros((n, gaussians[0].event_shape[0]))
+    for i in range(n):
+        # for now assume equal weighting, for n_components = 2
+        idx = np.random.randint(len(gaussians))
+        distr_to_sample = gaussians[idx]
+        x1[i, :] = distr_to_sample.sample((1,))
+        x2[i, :] = distr_to_sample.sample((1,))
+    print(x1.shape, x2.shape)
+    return {"train":(x1, x2), "gaussians":gaussians}
+
+
+
+
+
+        
 # %%
