@@ -4,7 +4,7 @@
 import os
 os.chdir(os.path.dirname(__file__))
 from datetime import datetime
-from data.loader import generate_cube_augs, generate_correlated_normal_augs
+from data.loader import generate_cube_augs, generate_correlated_normal_augs, generate_mixture_gaussians
 # %%
 import argparse
 import torch
@@ -27,8 +27,9 @@ def conditional_arg_default(carg_name, args, set_inplace):
     set_inplace: (when the default value exists,) specifies whether to set the conditional argument to its default value in args, or whether to just return the default value
     """
     default_val = None
-    nat_aug_defaults = {'d':25, 'k':5} # dict of cargs and default values for args in natural-augmentation data generating procedure
-    corr_normal_aug_defaults = {'num_feats':5, 'feat_dim':5} # ditto for args in correlated normal augmentations generating procedure
+    nat_aug_defaults = {'d':25, 'k':5}
+    corr_normal_aug_defaults = {'num_feats':5, 'feat_dim':5}
+    mix_aug_defaults = {'n_components':2, 'n_dim':2}
     # general args
     if carg_name == 'momentum':
         if args.alg == 'mssla' or args.alg == 'mssls': # momentum required for mssl
@@ -47,6 +48,9 @@ def conditional_arg_default(carg_name, args, set_inplace):
     if carg_name in corr_normal_aug_defaults:
         if args.aug == 'normal':
             default_val = corr_normal_aug_defaults[carg_name]
+    if carg_name in mix_aug_defaults:
+        if args.aug == 'mix':
+            default_val = mix_aug_defaults[carg_name]
     
     if default_val is not None: # if conditional arg has a default value
         if set_inplace: # set carg to default value in args
@@ -70,7 +74,7 @@ def parse_args():
 
     # Universal data generation arguments
     parser.add_argument("-n", type=int, default=(2 ** 16), help="number of data points")
-    parser.add_argument("--aug", type=str, required=True, help="specifies augmentation scheme, one of {'mult', 'add', 'corr', 'normal'}. see generate_cube_data function in ./data/loader.py for more information")
+    parser.add_argument("--aug", type=str, required=True, help="specifies augmentation scheme, one of {'mult', 'add', 'corr', 'normal', 'mix'}. see generate_cube_data function in ./data/loader.py for more information")
 
     # Other training arguments
     parser.add_argument("--epochs", type=int, default=100, help="number training epochs")
@@ -94,10 +98,14 @@ def parse_args():
     parser.add_argument("--num_feats", type=int, default=argparse.SUPPRESS, help="number of features in normal augmentation scheme")
     parser.add_argument("--feat_dim", type=int, default=argparse.SUPPRESS, help="dimension of each feature in normal augmentation scheme")
 
+    # Mixture of Gaussian Data Gen Params (if aug = mix)
+    parser.add_argument("--n_components", type=int, default=argparse.SUPPRESS, help="number of components in gaussian mixture")
+    parser.add_argument("--n_dim", type=int, default=argparse.SUPPRESS, help="data dimension")
+
     # Saving/loading
     parser.add_argument("--save_dir", type=str, required=False, help="directory to save model weights/run details to")
 
-    conditional_args = ['momentum', 'sgd_momentum', 'nat', 'd', 'k', 'tau_max', 'num_feats', 'feat_dim']
+    conditional_args = ['momentum', 'sgd_momentum', 'nat', 'd', 'k', 'tau_max', 'num_feats', 'feat_dim', 'n_components', 'n_dim']
     exclude_from_runname_args = ['alg', 'backbone', 'optim', 'nat', 'save_dir']
 
     args = parser.parse_args()
@@ -222,6 +230,8 @@ def main():
     # generate data
     if args.aug == 'normal': # normal correlated augmentations
         data_dict = generate_correlated_normal_augs(args.n, args.num_feats, args.feat_dim)
+    elif args.aug == 'mix': # mixture of data
+        data_dict = generate_mixture_gaussians(args.n, args.n_components, args.n_dim)
     else: # use natural-augmentation cube data procedure for data
         tau_max = None
         if args.aug == 'corr':
@@ -239,7 +249,13 @@ def main():
     emb_d = args.emb_dim
 
     # initialize backbone, using embedding dimension determined above
-    in_dim = args.d if hasattr(args, 'd') else args.feat_dim * args.num_feats
+    if hasattr(args, 'd'):
+        in_dim = args.d
+    elif hasattr(args, 'num_feats'):
+        in_dim = args.feat_dim * args.num_feats
+    else:
+        in_dim = args.n_dim
+        
     if args.backbone == "linear":          
         backbone = nn.Linear(in_dim, emb_d)
     elif args.backbone == "mlp":
