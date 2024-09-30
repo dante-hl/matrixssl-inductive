@@ -12,18 +12,6 @@ def centering_matrix(b: int):
     return torch.eye(b) - (torch.ones((b, b)) / b)
 
 
-# def matrix_log(X: torch.tensor, order: int = 4):
-#     """
-#     Calculates matrix logarithm via power series approximation specified by 'order'.
-#     """
-#     assert X.shape[0] == X.shape[1]
-#     d = X.shape[0]
-#     series = torch.zeros_like(X)
-#     for i in range(1, order + 1):
-#         series += torch.linalg.matrix_power(X - torch.eye(d), i) * ((-1) ** (i + 1)) / i
-#     return series
-
-
 def matrix_log(X: torch.tensor, order: int = 4):
     """
     matrix_log, from MEC. uses taylor expansion approximation
@@ -43,56 +31,6 @@ def matrix_log(X: torch.tensor, order: int = 4):
         summand = summand @ mult
     del mult, I_d
     return series
-
-
-def uniformity_loss(a1: torch.tensor, a2: torch.tensor):
-    """
-    Given uncentered (n_ft, b_size) matrices a1, a2, calculate their uniformity loss
-    """
-    assert a1.shape == a2.shape
-    d = a1.shape[0]
-    b = a1.shape[1]
-    H_b = centering_matrix(b).detach()
-    cross_cov = (1. / b) * a1 @ H_b @ a2.T
-    full = ((-1. / d) * torch.eye(d) @ matrix_log(cross_cov)) + cross_cov
-    return torch.trace(full)
-
-
-def alignment_loss(a1: torch.tensor, a2: torch.tensor, gamma: float):
-    """
-    Given uncentered (n_ft, b_size) matrices a1, a2, calculate their alignment loss
-    """
-    assert a1.shape == a2.shape
-    # d = a1.shape[0]
-    b = a1.shape[1]
-    H_b = centering_matrix(b).detach()
-    cross_cov = (1. / b) * a1 @ H_b @ a2.T
-    autocov1 = (1. / b) * a1 @ H_b @ a1.T
-    autocov2 = (1. / b) * a2 @ H_b @ a2.T
-    matrix_ce = torch.trace(-autocov1 @ matrix_log(autocov2) + autocov2)
-    loss = -torch.trace(cross_cov) + gamma * matrix_ce
-    return loss 
-
-
-def mssl_loss(z1: torch.tensor, z2: torch.tensor):
-    """
-    Given embedding matrices z1, z2, return MatrixSSL loss. This is a naive loss, in the sense that we assume that architecture employed is a symmetric encoder, just acting on two differently augmented sets of images
-    """
-    u_loss = uniformity_loss(z1, z2)
-    a_loss = alignment_loss(z1, z2)
-    return u_loss + a_loss, {"uniformity": u_loss, "alignment": a_loss}
-
-
-def symmetrized_mssl_loss(p1: torch.tensor, p2: torch.tensor, z1: torch.tensor, z2: torch.tensor, gamma: float):
-    """
-    Alternative version of the MatrixSSL loss, which accounts for the fact that the encoder used in practice is asymmetric and utilizes a stop gradient and exponential moving average for one of the networks. Requires as input two (target, predictor) embedding pairs (p1, z2) and (p2, z1), which are the outputs of augmentations x1, x2 passed through target and predictor networks respectively.
-    """
-    # I think you just have to normalize inputs before centering...
-    u_loss = uniformity_loss(p1, z2) + uniformity_loss(p2, z1)
-    # alignment loss returns huge value
-    a_loss = alignment_loss(p1, z2, gamma) + alignment_loss(p2, z1, gamma)
-    return u_loss + a_loss, {"uniformity": u_loss, "alignment": a_loss}
-
 
 
 def mce_loss_func(p, z, lamda=1., mu=1., order=4, align_gamma=0.003, correlation=True, logE=False):
@@ -116,8 +54,49 @@ def mce_loss_func(p, z, lamda=1., mu=1., order=4, align_gamma=0.003, correlation
         P = (1. / m) * (p.T @ J_m @ p) + mu_I
         Q = (1. / m) * (z.T @ J_m @ z) + mu_I
     return torch.trace(- P @ matrix_log(Q, order))
-    
 
+def mean_norm_diff_loss(z1, z2):
+    """
+    Calculate alignment loss given by E_{x, x' ~ p+}[||f(x)f(x)^T - f(x')f(x')^T||_F^2]
+    i.e the mean of Frobenius norm of difference between outer products). Note this is different from
+    the Frobenius norm of the mean difference between outer products (see norm_mean_diff_loss).
+
+    z1, z2: batch of B embeddings of shape (B, d) (???)
+    """
+    # B = z1.shape[0]
+    z1_outer = z1.unsqueeze(2) @ z1.unsqueeze(1) # unsqueeze and batch multiply for outer prods
+    z2_outer = z2.unsqueeze(2) @ z2.unsqueeze(1) # (B, d, 1) @ (B, 1, d) -> (B, d, d)
+    batched_outer_diff = z1_outer - z2_outer # shape (B, d, d)
+    # frobenius norm on last 2 dims
+    squared_norms = torch.linalg.matrix_norm(batched_outer_diff, ord='fro', dim=(1, 2)) ** 2
+    return torch.mean(squared_norms)
+
+def norm_mean_diff_loss(z1, z2):
+    """
+    Calculate alignment loss given by || E_{x, x' ~ p+}[f(x)f(x)^T - f(x')f(x')^T] ||_F^2
+    i.e the Frobenius norm of the mean difference between outer products. Note this is different from
+    the mean of Frobenius norm of difference between outer products (see mean_norm_diff_loss).
+
+    We expect this to not work, as for large batch sizes the term inside the expectation would just approach 0,
+    and wouldn't explicit encourage any specific feature learning.
+    """
+    B = z1.shape[0]
+    # d = z1.shape[1]
+    return torch.linalg.matrix_norm((z1.T @ z1 - z2.T @ z2)/B) ** 2
+
+def uniformity_loss(*args):
+    """
+    Calculate uniformity loss. Expects at least one of z1 or z2. If both are provided, uses both.
+    """
+    if len(args) == 1:
+        norms = torch.linalg.vector_norm(args[0], dim=1) ** 2
+        return -2 * torch.mean(norms)
+    elif len(args) == 2:
+        z1_norms = torch.linalg.vector_norm(args[0], dim=1) ** 2
+        z2_norms = torch.linalg.vector_norm(args[1], dim=1) ** 2
+        return -2 * torch.sqrt(torch.mean(z1_norms) * torch.mean(z2_norms))
+    else:
+        raise ValueError("Expected 1 or 2 arguments, got {}".format(len(args)))
 
 
 class MatrixSSL(nn.Module):
@@ -190,18 +169,15 @@ class MatrixSSL(nn.Module):
 
             # they use default (args) values: lambda=0.5, mu=0.5, all others match mce_loss_func defaults (identical to our implementation)
             # our current defaults are set to lambda=1, mu=1
+
+            # correlation = True terms are uniformity loss terms
+            # correlation = False are alignment terms
             loss = (
                 mce_loss_func(p2, z1, correlation=True) +
                 mce_loss_func(p1, z2, correlation=True) +
                 self.gamma * mce_loss_func(p2, z1, correlation=False) +
                 self.gamma * mce_loss_func(p1, z2, correlation=False)
                 ) * 0.5            
-            # loss = (
-            #         mce_loss_func(p2.T, z1.T, correlation=True)
-            #         + mce_loss_func(p1.T, z2.T, correlation=True)
-            #         + self.gamma * mce_loss_func(p2.T, z1.T, correlation=False)
-            #         + self.gamma * mce_loss_func(p1.T, z2.T, correlation=False)
-            #         ) * 0.5
             return {'loss': loss, 'd_dict': []} #d_dict}
         else: # worry about this later..
             # f = self.encoder
