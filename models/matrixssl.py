@@ -63,7 +63,10 @@ def mean_norm_diff_loss(z1, z2):
 
     z1, z2: batch of B embeddings of shape (B, d) (???)
     """
-    # B = z1.shape[0]
+    d = z1.shape[1]
+    J_d = centering_matrix(d).detach()
+    z1 = z1 @ J_d
+    z2 = z2 @ J_d
     z1_outer = z1.unsqueeze(2) @ z1.unsqueeze(1) # unsqueeze and batch multiply for outer prods
     z2_outer = z2.unsqueeze(2) @ z2.unsqueeze(1) # (B, d, 1) @ (B, 1, d) -> (B, d, d)
     batched_outer_diff = z1_outer - z2_outer # shape (B, d, d)
@@ -100,13 +103,14 @@ def uniformity_loss(*args):
 
 
 class MatrixSSL(nn.Module):
-    def __init__(self, backbone, emb_dim, gamma: float = 1.0, asym=True, momentum=0.9):
+    def __init__(self, backbone, emb_dim, gamma: float = 1.0, asym=True, momentum=0.9, loss_type: str = 'mce'):
         """
         backbone: encoder/embedding function
         emb_dim: embedding dimension 
         gamma: weight ratio in alignment loss (see alignment loss func)
         asym: whether we use asymmetric siamese (online-target) networks, with momentum averaging for the target network
         momentum: momentum parameter for moving average of target network. only required if asym = True. must be within [0, 1]
+        loss_to_use: which loss to use for training. options are 'mce'/'mean_norm_diff'/'norm_mean_diff'
         """
         super().__init__()
         self.asym = asym
@@ -114,6 +118,9 @@ class MatrixSSL(nn.Module):
         self.gamma = gamma
         self.backbone = backbone
         self.emb_dim = emb_dim
+        self.loss_type = loss_type
+        if not asym and self.loss_type == 'mce':
+            raise ValueError("MCE loss doesn't work with siamese networks")
         if asym:
             self.momentum = momentum
 
@@ -158,32 +165,43 @@ class MatrixSSL(nn.Module):
                 param.requires_grad = False
 
         else:
-            self.encoder = nn.Sequential(self.backbone)
+            self.online_backbone = copy.deepcopy(self.backbone)
+            self.projector = nn.Sequential(
+                nn.Linear(emb_dim, emb_dim, bias=False),
+                nn.BatchNorm1d(emb_dim)
+            )
+            self.online = nn.Sequential(self.online_backbone, self.projector)
 
     def forward(self, x1, x2):
         if self.asym:
             z1, z2 = self.online(x1), self.online(x2)
             with torch.no_grad():
                 p1, p2 = self.target(x1), self.target(x2)
-            # loss, d_dict = symmetrized_mssl_loss(p1,p2,z1,z2, self.gamma)
-
-            # they use default (args) values: lambda=0.5, mu=0.5, all others match mce_loss_func defaults (identical to our implementation)
-            # our current defaults are set to lambda=1, mu=1
 
             # correlation = True terms are uniformity loss terms
             # correlation = False are alignment terms
-            loss = (
-                mce_loss_func(p2, z1, correlation=True) +
-                mce_loss_func(p1, z2, correlation=True) +
-                self.gamma * mce_loss_func(p2, z1, correlation=False) +
-                self.gamma * mce_loss_func(p1, z2, correlation=False)
-                ) * 0.5            
+            if self.loss_type == 'mce':
+                loss = (
+                    mce_loss_func(p2, z1, correlation=True) +
+                    mce_loss_func(p1, z2, correlation=True) +
+                    self.gamma * mce_loss_func(p2, z1, correlation=False) +
+                    self.gamma * mce_loss_func(p1, z2, correlation=False)
+                    ) * 0.5
+            elif self.loss_type == 'mean_norm_diff':
+                loss = mean_norm_diff_loss(p2, z1) + uniformity_loss(p2, z1) +\
+                       mean_norm_diff_loss(p1, z2) + uniformity_loss(p1, z2)
+            elif self.loss_type == 'norm_mean_diff':
+                loss = norm_mean_diff_loss(p2, z1) + uniformity_loss(p2, z1) +\
+                       norm_mean_diff_loss(p1, z2) + uniformity_loss(p1, z2)
             return {'loss': loss, 'd_dict': []} #d_dict}
-        else: # worry about this later..
-            # f = self.encoder
-            # z1 = f(x1)
-            # # z1, z2 = f(x1), f(x2)
-            # loss, d_dict = mssl_loss(z1, z2)
-            # return loss, d_dict
-            pass
+        else:
+            f = self.online # backbone + projector
+            z1, z2 = f(x1), f(x2)
+            if self.loss_type == 'mean_norm_diff':
+                loss = mean_norm_diff_loss(z1, z2) + uniformity_loss(z1, z2)
+            elif self.loss_type == 'norm_mean_diff':
+                loss = norm_mean_diff_loss(z1, z2) + uniformity_loss(z1, z2)
+            return {'loss': loss, 'd_dict': []}
 
+
+# %%
