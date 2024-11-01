@@ -1,8 +1,15 @@
 # %%
-# %%
 # set cwd set to matrixssl-inductive
 import os
-os.chdir(os.path.dirname(__file__))
+import sys 
+# %%
+if __file__ == "pretrain.py":
+    pass # debugging, must already be in root
+else:
+    script_dir = os.path.dirname(__file__)
+    os.chdir(script_dir)
+
+
 from datetime import datetime
 from data.loader import generate_cube_augs, generate_correlated_normal_augs, generate_mixture_gaussians
 # %%
@@ -51,6 +58,11 @@ def conditional_arg_default(carg_name, args, set_inplace):
     if carg_name in mix_aug_defaults:
         if args.aug == 'mix':
             default_val = mix_aug_defaults[carg_name]
+    # if carg_name == 'loss_type':
+    #     if args.alg == 'mssla':
+    #         default_val = 'mce'
+    #     elif args.alg == 'mssls':
+    #         default_val = 'mean_norm_diff'
     
     if default_val is not None: # if conditional arg has a default value
         if set_inplace: # set carg to default value in args
@@ -59,7 +71,7 @@ def conditional_arg_default(carg_name, args, set_inplace):
         else: # otherwise return the default value
             return default_val
     else:
-        return None # for conditional args that don't have default values (i.e nat)
+        return None # for conditional args that don't have default values (i.e nat, loss_type)
     
 
 def parse_args():
@@ -73,7 +85,7 @@ def parse_args():
     parser.add_argument("--emb_dim", type=int, default=10, help="embedding dimension")
 
     # Universal data generation arguments
-    parser.add_argument("-n", type=int, default=(2 ** 16), help="number of data points")
+    parser.add_argument("--n", type=int, default=(2 ** 16), help="number of data points")
     parser.add_argument("--aug", type=str, required=True, help="specifies augmentation scheme, one of {'mult', 'add', 'corr', 'normal', 'mix'}. see generate_cube_data function in ./data/loader.py for more information")
 
     # Other training arguments
@@ -87,11 +99,12 @@ def parse_args():
     parser.add_argument("--momentum", type=float, default=argparse.SUPPRESS, help="momentum averaging parameter for MatrixSSL with asymmetric networks. required if alg set to mssla, must be in [0, 1]")
     parser.add_argument("--sgd_momentum", type=float, default=argparse.SUPPRESS, help="SGD momentum parameter")
     # parser.add_argument("--hidden_dim", type=int, default=20, help="dimension of hidden layer in predictor network for MatrixSSL with assymetric networks. required if alg set to mssla")
+    parser.add_argument("--loss_type", type=str, default=argparse.SUPPRESS, help="loss function to use for MatrixSSL, one of {'mce', 'mean_norm_diff', 'norm_mean_diff'}. required if alg set to mssla or mssls")
 
     # Natural -> Augmentation Data Generation Parameters (for if aug = mult, add, corr)
     parser.add_argument("--nat", type=str, default=argparse.SUPPRESS, help="specifies natural data sampling scheme, one of {'bool', 'unif'}; see generate_cube_data function in ./data/loader.py for more information")
-    parser.add_argument("-d", type=int, default=argparse.SUPPRESS, help="dimension of data")
-    parser.add_argument("-k", type=int, default=argparse.SUPPRESS, help="denotes first k dimensions, which may be augmented or unaugmented, depending on the augment scheme")
+    parser.add_argument("--d", type=int, default=argparse.SUPPRESS, help="dimension of data")
+    parser.add_argument("--k", type=int, default=argparse.SUPPRESS, help="denotes first k dimensions, which may be augmented or unaugmented, depending on the augment scheme")
     parser.add_argument("--tau_max", type=float, default=argparse.SUPPRESS, help="specifies bounds for uniformly sampling tau from [-tau_max, tau_max] when aug='corr'. must be >0")
 
     # Correlated Normal Data Generation Parameters (for if aug = normal)
@@ -105,8 +118,8 @@ def parse_args():
     # Saving/loading
     parser.add_argument("--save_dir", type=str, required=False, help="directory to save model weights/run details to")
 
-    conditional_args = ['momentum', 'sgd_momentum', 'nat', 'd', 'k', 'tau_max', 'num_feats', 'feat_dim', 'n_components', 'n_dim']
-    exclude_from_runname_args = ['alg', 'backbone', 'optim', 'nat', 'save_dir']
+    conditional_args = ['momentum', 'sgd_momentum', 'nat', 'd', 'k', 'tau_max', 'num_feats', 'feat_dim', 'n_components', 'n_dim', 'loss_type']
+    exclude_from_runname_args = ['alg', 'backbone', 'optim', 'nat', 'aug', 'save_dir']
 
     args = parser.parse_args()
 
@@ -216,15 +229,11 @@ def main():
             os.makedirs(args.save_dir)
         save_dir = args.save_dir
     else: # default is ./outputs
-        save_dir = './outputs'
-    # save to folder specified by natural, augmentation settings
-    run_dir = os.path.join(save_dir, "_".join(task_args))
-    # if not os.path.isdir(save_dir):
-    #     os.makedirs(save_dir)
+        save_dir = './outputs'  
     # run name without "_run#" appended
     runname_prefix = "_".join(runname_args)
     # append "_run#" at end (start with 1 for first run)
-    run_path = generate_runpath(os.path.join(run_dir, runname_prefix), 1)
+    run_path = generate_runpath(os.path.join(save_dir, runname_prefix), 1)
     os.makedirs(run_path)
 
     # generate data
@@ -258,6 +267,11 @@ def main():
         
     if args.backbone == "linear":          
         backbone = nn.Linear(in_dim, emb_d)
+    elif args.backbone == 'relu':
+        backbone = nn.Sequential(
+            nn.Linear(in_dim, emb_d),
+            nn.ReLU(inplace=True)
+        )
     elif args.backbone == "mlp":
         backbone = nn.Sequential(
             nn.Linear(in_dim, 2*in_dim),
@@ -265,7 +279,7 @@ def main():
             nn.Linear(2*in_dim, emb_d)
             )
     else:
-        raise Exception("Invalid argument 'backbone', expected one of {'linear', 'mlp'}")
+        raise Exception("Invalid argument 'backbone', expected one of {'linear', 'relu', 'mlp'}")
 
     # set up SSL architecture
     # ssl_model refers to both the backbone and the SSL algorithm/task used to train it
@@ -274,9 +288,9 @@ def main():
     elif args.alg == "mssla":
         if (not (0 <= args.momentum <= 1)):
             raise Exception("Momentum averaging parameter must be set to a value within [0, 1] for asymmetric MatrixSSL")
-        ssl_model = MatrixSSL(backbone=backbone, emb_dim=emb_d, asym=True, momentum=args.momentum)
+        ssl_model = MatrixSSL(backbone=backbone, emb_dim=emb_d, asym=True, momentum=args.momentum, loss_type=args.loss_type)
     elif args.alg == "mssls":
-        ssl_model = MatrixSSL(backbone=backbone, emb_dim=emb_d, asym=False)
+        ssl_model = MatrixSSL(backbone=backbone, emb_dim=emb_d, asym=False, loss_type=args.loss_type)
     else:
         raise Exception("Invalid argument 'alg', must be one of {'spectral', 'mssla', 'mssls'}")
     # send model to device
@@ -296,7 +310,6 @@ def main():
     if hasattr(args, 'sched'):
         if args.sched == 'step':
             scheduler = StepLR(opt, step_size=30, gamma=0.1)
-    # TODO: ############################################################################
     
     epochs = args.epochs
 
@@ -316,8 +329,9 @@ def main():
 
         ssl_model.train()
         # listen to gradient calculations for online network
-        for param in ssl_model.online.parameters():
-            param.requires_grad = True
+        if getattr(ssl_model, "asym", False):
+            for param in ssl_model.online.parameters():
+                param.requires_grad = True
 
         # inner training loop
         for idx, (x1, x2) in enumerate(trainloader):
@@ -333,8 +347,9 @@ def main():
             # calculate and log gradient norms
             for name, param in ssl_model.online_backbone.named_parameters():
                 if param.grad is not None:
+                    consistent_name = name.split('.')[-1]
                     gradient_norm = torch.norm(param.grad)
-                    gradient_norms[name].append(gradient_norm.item())
+                    gradient_norms[consistent_name].append(gradient_norm.item())
             del loss, x1, x2
             # update weights
             opt.step()
