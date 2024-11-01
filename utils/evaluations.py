@@ -5,6 +5,7 @@ import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 import matplotlib.pyplot as plt
 import numpy as np
+from torch.distributions import MultivariateNormal
 
 # split evaluate_embeddings into fitting linear classifier, and getting test scores
 
@@ -17,6 +18,8 @@ def fit_classifiers(dirs, val, val_labels, plot_train=False):
         classifiers: list of trained nn.Linear modules, one per directory
     
     Requires val_labels to be {0, 1} labels rather than {-1, 1} labels, since uses BCE(WithLogits)Loss
+
+    `dirs` can be a single directory, or a list of directories. If it is a single directory, all subdirectories are assumed to be runs.
     """
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     # prepare datasets
@@ -26,13 +29,32 @@ def fit_classifiers(dirs, val, val_labels, plot_train=False):
     backbones = []
     classifiers = []
     val_losses_list = []
+
+    if isinstance(dirs, str) and os.path.isdir(dirs):
+        subdirs = [os.path.join(dirs, d) for d in os.listdir(dirs)]
+        dirs = subdirs
     for idx, dir in enumerate(dirs):
         # print(f'Run {idx+1}')
         # load embedding function (backbone), create linear classifier (linear)
         run_dict = torch.load(os.path.join(dir, 'run_dict'))
         weights = run_dict['model_weights']
+        key = 'weight' if 'weight' in weights.keys() else '0.weight'
+        in_dim = weights[key].shape[1]
         emb_dim = run_dict['args'].emb_dim
-        backbone = nn.Linear(weights['weight'].shape[1], weights['weight'].shape[0]).to(device)
+        backbone_type = run_dict['args'].backbone
+        if backbone_type == 'linear':
+            backbone = nn.Linear(in_dim, emb_dim).to(device)
+        elif backbone_type == 'relu':
+            backbone = nn.Sequential(
+                nn.Linear(in_dim, emb_dim),
+                nn.ReLU(inplace=True)
+            )   
+        elif backbone_type == "mlp":
+            backbone = nn.Sequential(
+                nn.Linear(in_dim, 2*in_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(2*in_dim, emb_dim)
+                )
         backbone.load_state_dict(weights)
         # no weight updates for backbone
         for param in backbone.parameters():
@@ -105,13 +127,17 @@ def evaluate_classifiers(backbones, classifiers, test, test_labels, print_stats=
 
 def evaluate_normal_downstream(dirs, n_val, n_test, gt_idx=0, plot_train=False, print_stats=False):
     """
-    Given a list `dir` of run directories (presumed to be on 'normal' augmented data), evaluate the downstream performance of the learned representations by training a binary linear classifier on validation data, and testing classification accuracy on test data.
+    For all runs in `dirs`, evaluate the downstream performance of the learned representations by training a binary linear classifier on validation data, and testing classification accuracy on test data.
 
     Natural/unagumented test/validation data is assumed to be distributed according to an isotropic normal with dimensions equal to the number of features * dimension of each feature. The label for test and validation is determined by a single feature indicated by `gt_idx`, which indexes the feature in gt_vecs list from the run's saved output.
 
+    `dirs` can be a single directory, or a list of directories. If it is a single directory, all subdirectories are assumed to be runs.
     `n_val`, `n_test` indicate how many points of validation/test data in the procedure described above.
     """
     test_scores = [] # downstream/test classification accuracy score for linear(emb_dim, 1) classifier fit onto validation data
+    if isinstance(dirs, str) and os.path.isdir(dirs):
+        subdirs = [os.path.join(dirs, d) for d in os.listdir(dirs)]
+        dirs = subdirs
     for idx, dir in enumerate(dirs):
         run_dict = torch.load(os.path.join(dir, 'run_dict'))
         gt_vecs = run_dict['data']['gt_vecs']
@@ -124,8 +150,9 @@ def evaluate_normal_downstream(dirs, n_val, n_test, gt_idx=0, plot_train=False, 
         # Print true feature (that determines labels)
         if print_stats:
             print(f"Run {idx+1} label feature: {gt_vecs[gt_idx]}")
-        weights = run_dict['model_weights']['weight']
         # Print weights corresponding to the labeling feature that have been learnt (to see if they are similar/well learnt)
+        # key = 'weight' if 'weight' in run_dict['model_weights'].keys() else '0.weight'
+        # weights = run_dict['model_weights'][key]
         # print(f"Run {idx+1} feature weights: {weights[gt_idx, gt_idx*d:(gt_idx+1)*d]}")
         val_data = std_mvn.sample((n_val,))
         val_y = (torch.sign(val_data @ label_vec) + 1)/2
@@ -142,7 +169,12 @@ def get_feature_downstream_scores(dirs, plot_train=False, print_stats=False):
     Calls evaluate_normal_downstream for all possible features that define the label, for all directories in `dirs`. Assumes all runs in dirs are run on data with the same number of features.
 
     Returns an array of shape (len(dirs), num_features), where the (i, j)th entry denotes the downstream accuracy for run i, for downstream task based on feature j. Rows represent runs and columns represent features. A good representation should (at least) get good scores across the entire row.
+
+    `dirs` can be a single directory, or a list of directories. If it is a single directory, all subdirectories are assumed to be runs.
     """
+    if isinstance(dirs, str) and os.path.isdir(dirs):
+        subdirs = [os.path.join(dirs, d) for d in os.listdir(dirs)]
+        dirs = subdirs
     run_dict = torch.load(os.path.join(dirs[0], 'run_dict'))
     num_feats = run_dict['args'].num_feats
     scores_array = np.zeros((len(dirs), num_feats)) # one row per run, one col per feature

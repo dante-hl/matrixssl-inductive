@@ -9,8 +9,7 @@ import matplotlib.pyplot as plt
 
 def plot_metrics(dirs, toplot='train_losses', aggregate=True, plotall=False):
     """
-    Plots specified metric of a single run or of multiple runs. 
-    Each directory in dirs expects a path to the exact run directory.
+    Plots specified metric of all runs in `dirs`. `dirs` can be a single directory, or a list of directories. If it is a single directory, all subdirectories are assumed to be runs.
 
     toplot specifies metric to be plotted. includes {'train_losses', 'gradient_norms'}
     """
@@ -23,6 +22,10 @@ def plot_metrics(dirs, toplot='train_losses', aggregate=True, plotall=False):
         metrics_dict['weight'] = []
         metrics_dict['bias'] = []
         title_append = "gradient norms"
+    # if dirs is a single directory create list of subdirectories
+    if isinstance(dirs, str) and os.path.isdir(dirs): 
+        subdirs = [os.path.join(dirs, d) for d in os.listdir(dirs)]
+        dirs = subdirs
     # for the specified metric, add each run's series to its corresponding list
     for dir in dirs:
         run_dict = torch.load(os.path.join(dir, 'run_dict'))
@@ -56,18 +59,23 @@ def plot_metrics(dirs, toplot='train_losses', aggregate=True, plotall=False):
     plt.show()
             
 
-def show_weights(names, single_dir=None, plot_weights=True, subtitle=True, title=True):
+def show_weights(dirs, over_time=False, plot_weights=True, subtitle=True, title=True):
     """
-    Plot weight matrices across runs (single_dir=None), or weight matrices within the same run (single_dir not None)
-
-    single_dir determines if names is interpreted as a list of directories/runs for which we plot all final weight matrices in run_dict (use case: same parameters but over multiple runs, so single_dir=None), or a list of filenames from which we plot (use case: weights over time in a single run, so then dir must be provided).
-
-    when needed, dir expects the relative path to the exact run directory
+    Plot weight matrices across runs in `dirs` (over_time=False), or weight matrices across time within the same run (over_time=True).
     """
     subplot_width = 2.5
     subplot_height = 2.5
     if plot_weights:
-        n_plots = len(names)
+        if over_time:
+            # expect dirs to be single path string, assert all subpaths of dirs are not directories
+            subpaths = [os.path.join(dirs, d) for d in os.listdir(dirs) if not d.endswith('run_dict')]
+            assert all(not os.path.isdir(subpath) for subpath in subpaths)
+            n_plots = len(subpaths) - 1
+        else:
+            if isinstance(dirs, str) and os.path.isdir(dirs):
+                subdirs = [os.path.join(dirs, d) for d in os.listdir(dirs)]
+                dirs = subdirs
+            n_plots = len(dirs)
         n_cols = 3
         n_rows = math.ceil(n_plots / n_cols)
         if n_plots == 1:
@@ -75,26 +83,30 @@ def show_weights(names, single_dir=None, plot_weights=True, subtitle=True, title
         else:
             fig, ax = plt.subplots(n_rows, n_cols, figsize=(subplot_width*n_cols, subplot_height*n_rows), constrained_layout=True)
             ax = ax.flatten()
-        if single_dir is None: # we are plotting final weights for one or more runs/directories
-            for idx, run_dir in enumerate(names):
+        if not over_time: # plotting final weights for all runs in dirs
+            if isinstance(dirs, str) and os.path.isdir(dirs):
+                subdirs = [os.path.join(dirs, d) for d in os.listdir(dirs)]
+                dirs = subdirs
+            for idx, run_dir in enumerate(dirs):
                 row = idx // 3
                 col = idx % 3
                 run_dict = torch.load(os.path.join(run_dir, 'run_dict'))
                 weights = run_dict['model_weights']
+                key = 'weight' if 'weight' in weights.keys() else '0.weight'
                 current_ax = ax if n_plots == 1 else ax[idx]
-                im = current_ax.imshow(weights['weight'], cmap='hot', interpolation='nearest', vmin=-0.8, vmax=0.8)
+                im = current_ax.imshow(weights[key], cmap='hot', interpolation='nearest', vmin=-0.8, vmax=0.8)
                 if subtitle:
                     current_ax.set_title(f"run {idx+1}") # intended to be used for multiple runs within the same params
-        else: # we are plotting weights over time for a single run/directory
-            assert single_dir is not None
-            for idx, filename in enumerate(names):
+        else: # plotting weights over time for a single run/directory
+            for idx, filepath in enumerate(subpaths):
                 # row = idx // 3 # uncomment this soon
                 # col = idx % 3
-                weights = torch.load(os.path.join(single_dir, filename))
+                weights = torch.load(filepath)
+                key = 'weight' if 'weight' in weights.keys() else '0.weight'
                 current_ax = ax if n_plots == 1 else ax[idx]
-                im = current_ax.imshow(weights['weight'], cmap='hot', interpolation='nearest', vmin=-0.8, vmax=0.8)
+                im = current_ax.imshow(weights[key], cmap='hot', interpolation='nearest', vmin=-0.8, vmax=0.8)
                 # ax[idx].title(f"run {idx+1}")
-            run_dict = torch.load(os.path.join(single_dir, 'run_dict'))
+            run_dict = torch.load(os.path.join(dirs, 'run_dict'))
         if title == True:
             fig.suptitle(f"{' '.join(run_dict['essential_args'])}")
         elif title:
@@ -141,7 +153,9 @@ def plot_embeddings(dirs, toplot, diff=False, n=20, print_stats=True, subtitle=F
     aug_contribution_list = [] # list of squares of contribution ratios of augmented dimensions of embedding differences, to measure contribution of difference elements corresp to augmented dims. 1 - this gives corresp. contribution of unaugmented dims
     for idx, dir in enumerate(dirs):
         run_dict = torch.load(os.path.join(dir, 'run_dict'))
-        weights = run_dict['model_weights']['weight']
+        weight_dict = run_dict['model_weights']
+        key = 'weight' if 'weight' in weight_dict.keys() else '0.weight'
+        weights = weight_dict[key]
         x1, x2 = run_dict['data']['train'][0], run_dict['data']['train'][1]
         args = run_dict["args"]
 
