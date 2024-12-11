@@ -9,7 +9,6 @@ else:
     script_dir = os.path.dirname(__file__)
     os.chdir(script_dir)
 
-
 from datetime import datetime
 from data.loader import generate_cube_augs, generate_correlated_normal_augs, generate_mixture_gaussians
 # %%

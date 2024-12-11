@@ -110,7 +110,7 @@ class MatrixSSL(nn.Module):
         gamma: weight ratio in alignment loss (see alignment loss func)
         asym: whether we use asymmetric siamese (online-target) networks, with momentum averaging for the target network
         momentum: momentum parameter for moving average of target network. only required if asym = True. must be within [0, 1]
-        loss_to_use: which loss to use for training. options are 'mce'/'mean_norm_diff'/'norm_mean_diff'
+        loss_type: which loss to use for training. options are 'mce'/'mean_norm_diff'/'norm_mean_diff'
         """
         super().__init__()
         self.asym = asym
