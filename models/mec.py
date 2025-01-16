@@ -73,8 +73,11 @@ def gather_from_all(tensor: torch.Tensor) -> torch.Tensor:
     return gathered_tensor
 
 def mce_loss_func(p, z, lamda=1., mu=1., order=4, align_gamma=0.003, correlation=True, logE=False):
-    p = gather_from_all(p)
-    z = gather_from_all(z)
+    #########################################################
+    # REMOVE COMMENT WHEN RUNNING DISTRIBUTED TRAINING
+    #########################################################
+    # p = gather_from_all(p)
+    # z = gather_from_all(z)
 
     p = F.normalize(p)
     z = F.normalize(z)
@@ -94,7 +97,6 @@ def mce_loss_func(p, z, lamda=1., mu=1., order=4, align_gamma=0.003, correlation
     return torch.trace(- P @ matrix_log(Q, order))
 
 
-# TODO: across entire file: add device??
 class MEC(nn.Module):
     """
     Build a MEC model.
@@ -112,6 +114,7 @@ class MEC(nn.Module):
         self.mce_lambda = mce_lambda # coefficient multiplying matrix P in correlation=True terms
         self.mce_mu = mce_mu # coefficient for extra identity term added for stability in each matrix in loss
         self.mce_order = mce_order # order of matrix log
+        self.asym = True # MEC is automatically asymmeytric in nature
 
         # create base encoder
         # num_classes is the output fc dimension, zero-initialize last BNs
@@ -157,40 +160,55 @@ class MEC(nn.Module):
         Output:
             p1, p2, z1, z2: targets and predictions of teacher and student networks, respectively
         """
-        z1 = self.projector(self.encoder(x1))
-        z2 = self.projector(self.encoder(x2))
-        z1 = self.predictor(z1)
-        z2 = self.predictor(z2)
+        z1 = F.normalize(self.encoder(x1), p=2, dim=1)
+        z2 = F.normalize(self.encoder(x2), p=2, dim=1)
+        z1 = self.predictor(self.projector(z1))
+        z2 = self.predictor(self.projector(z2))
 
         # print(f"After z1, z2: {z1.shape}")
         # print_memory_stats()
 
         with torch.no_grad():
-            p1 = self.teacher_projector(self.teacher_encoder(x1))
-            p2 = self.teacher_projector(self.teacher_encoder(x2))
+            p1 = self.teacher_projector(F.normalize(self.teacher_encoder(x1), p=2, dim=1))
+            p2 = self.teacher_projector(F.normalize(self.teacher_encoder(x2), p=2, dim=1))
 
         # print("After p1, p2")
         # print_memory_stats()
 
         if self.loss_type == 'mce':
-            loss = (
-                    mce_loss_func(p2, z1, correlation=True, lamda=self.mce_lambda, mu=self.mce_mu, order=self.mce_order) +
-                    mce_loss_func(p1, z2, correlation=True, lamda=self.mce_lambda, mu=self.mce_mu, order=self.mce_order) +
-                    self.mce_gamma * mce_loss_func(p2, z1, correlation=False, lamda=self.mce_lambda, mu=self.mce_mu, order=self.mce_order) +
-                    self.mce_gamma * mce_loss_func(p1, z2, correlation=False, lamda=self.mce_lambda, mu=self.mce_mu, order=self.mce_order)
-                    ) * 0.5
+            alignment_loss = (
+                self.mce_gamma * mce_loss_func(p2, z1, correlation=False, lamda=self.mce_lambda, mu=self.mce_mu, order=self.mce_order) +
+                self.mce_gamma * mce_loss_func(p1, z2, correlation=False, lamda=self.mce_lambda, mu=self.mce_mu, order=self.mce_order)
+            )
+            unif_loss = (
+                mce_loss_func(p2, z1, correlation=True, lamda=self.mce_lambda, mu=self.mce_mu, order=self.mce_order) +
+                mce_loss_func(p1, z2, correlation=True, lamda=self.mce_lambda, mu=self.mce_mu, order=self.mce_order)
+            )
+            loss = 0.5 * (alignment_loss + unif_loss)
+            # loss = (
+            #         mce_loss_func(p2, z1, correlation=True, lamda=self.mce_lambda, mu=self.mce_mu, order=self.mce_order) +
+            #         mce_loss_func(p1, z2, correlation=True, lamda=self.mce_lambda, mu=self.mce_mu, order=self.mce_order) +
+            #         self.mce_gamma * mce_loss_func(p2, z1, correlation=False, lamda=self.mce_lambda, mu=self.mce_mu, order=self.mce_order) +
+            #         self.mce_gamma * mce_loss_func(p1, z2, correlation=False, lamda=self.mce_lambda, mu=self.mce_mu, order=self.mce_order)
+            #         ) * 0.5
         elif self.loss_type == 'mean_norm_diff':
-            loss = mean_norm_diff_loss(p2, z1) + uniformity_loss(p2, z1) +\
-                   mean_norm_diff_loss(p1, z2) + uniformity_loss(p1, z2)
+            alignment_loss = mean_norm_diff_loss(p2, z1) + mean_norm_diff_loss(p1, z2)
+            unif_loss = uniformity_loss(p2, z1) + uniformity_loss(p1, z2)
+            loss = alignment_loss + unif_loss
+            # loss = mean_norm_diff_loss(p2, z1) + uniformity_loss(p2, z1) +\
+            #        mean_norm_diff_loss(p1, z2) + uniformity_loss(p1, z2)
         elif self.loss_type == 'norm_mean_diff':
-            loss = norm_mean_diff_loss(p2, z1) + uniformity_loss(p2, z1) +\
-                   norm_mean_diff_loss(p1, z2) + uniformity_loss(p1, z2)
+            alignment_loss = norm_mean_diff_loss(p2, z1) + norm_mean_diff_loss(p1, z2)
+            unif_loss = uniformity_loss(p2, z1) + uniformity_loss(p1, z2)
+            loss = alignment_loss + unif_loss
+            # loss = norm_mean_diff_loss(p2, z1) + uniformity_loss(p2, z1) +\
+            #        norm_mean_diff_loss(p1, z2) + uniformity_loss(p1, z2)
         else:
             raise Exception(f"loss_type not specified, was {self.loss_type}")
             
         # print("After loss")
         # print_memory_stats()
-        return {'loss': loss, 'd_dict': []} #, {'z1':z1, 'z2':z2, 'p1':p1.detach(), 'p2':p2.detach()}
+        return {'loss': loss, 'alignment_loss':alignment_loss, 'uniformity_loss':unif_loss, 'd_dict': []} #, {'z1':z1, 'z2':z2, 'p1':p1.detach(), 'p2':p2.detach()}
         
 
 class FixedQuadraticLayer(nn.Module):
@@ -207,15 +225,16 @@ class FixedQuadraticLayer(nn.Module):
         x: (..., d) torch tensor
         returns out: (..., d*(d+1)/2 ) tensor
         """
+        device = x.device
         batch_dims = x.shape[:-1]
-        out = torch.zeros(*batch_dims, self.out_dim)
+        out = torch.zeros(*batch_dims, self.out_dim).to(device)
         batched_outer_prods = torch.bmm(x.unsqueeze(-1), x.unsqueeze(-2))
         out[..., :self.in_dim] = torch.diagonal(batched_outer_prods, dim1=-2, dim2=-1)
-        indices = torch.tril_indices(self.in_dim, self.in_dim, offset=-1)
+        indices = torch.tril_indices(self.in_dim, self.in_dim, offset=-1).to(device)
         out[..., self.in_dim:] = batched_outer_prods[..., indices[0], indices[1]]
         return out
         
-
+# TODO: update with all changes
 class SpectralMEC(nn.Module):
     """
     MEC with Spectral Loss modification (extra layer, and use SCL loss)
@@ -239,7 +258,7 @@ class SpectralMEC(nn.Module):
         # num_classes is the output fc dimension, zero-initialize last BNs
         self.encoder = base_encoder(num_classes=dim, zero_init_residual=True)
         prev_dim = self.encoder.fc.weight.shape[1]
-        new_dim = prev_dim * (prev_dim + 1) / 2
+        new_dim = int(prev_dim * (prev_dim + 1) / 2)
 
         # create new feature layer
         if self.layer_type == 'learnt':
@@ -250,7 +269,25 @@ class SpectralMEC(nn.Module):
             raise Exception(f"invalid input for 'layer_type', expected 'learnt' or 'fixed', got {layer_type}")
 
         # create 3 layer projector
-        self.projector = nn.Sequential(nn.Linear(prev_dim, prev_dim, bias=False),
+        # self.projector = nn.Sequential(nn.Linear(prev_dim, prev_dim, bias=False),
+        #                                 nn.BatchNorm1d(prev_dim),
+        #                                 nn.ReLU(inplace=True), # first layer
+        #                                 nn.Linear(prev_dim, prev_dim, bias=False),
+        #                                 nn.BatchNorm1d(prev_dim),
+        #                                 nn.ReLU(inplace=True), # second layer
+        #                                 self.encoder.fc,
+        #                                 nn.BatchNorm1d(dim, affine=False)) # output layer
+        # self.projector[6].bias.requires_grad = False # hack: not use bias as it is followed by BN
+
+        # # remove fc from 'encoder' for cleaner separation
+        # self.encoder = nn.Sequential(*(list(self.encoder.children())[:-1])) 
+
+        # # if symmetric, use only online (encoder > new layer > projector) on both augments
+        # self.online = nn.Sequential(self.encoder, self.new_layer, self.projector)
+
+        # create 3 layer projector (involves adding 'fc' from encoder)
+        prev_dim = self.encoder.fc.weight.shape[1]
+        self.projector = nn.Sequential(nn.Linear(new_dim, prev_dim, bias=False),
                                         nn.BatchNorm1d(prev_dim),
                                         nn.ReLU(inplace=True), # first layer
                                         nn.Linear(prev_dim, prev_dim, bias=False),
@@ -260,24 +297,49 @@ class SpectralMEC(nn.Module):
                                         nn.BatchNorm1d(dim, affine=False)) # output layer
         self.projector[6].bias.requires_grad = False # hack: not use bias as it is followed by BN
 
-        # remove fc from 'encoder' for cleaner separation
-        self.encoder = nn.Sequential(*(list(self.encoder.children())[:-1])) 
+        # effectively remove fc from 'encoder' for clean separation
+        self.encoder.fc = nn.Identity()
 
-        # if symmetric, use only online (encoder > new layer > projector) on both augments
-        self.online = nn.Sequential(self.encoder, self.new_layer, self.projector)
+        if self.asym:
 
-        if self.asym: # include teacher, predictor in student
-            # 2-layer predictor
+            # create 2 layer predictor
             self.predictor = nn.Sequential(nn.Linear(dim, pred_dim, bias=False),
                                             nn.BatchNorm1d(pred_dim),
                                             nn.ReLU(inplace=True), # hidden layer
                                             nn.Linear(pred_dim, dim)) # output layer
-    
-            self.teacher = copy.deepcopy(self.online) # encoder > new layer > projector
+
+            self.teacher_encoder = copy.deepcopy(self.encoder)
+            self.teacher_new_layer = copy.deepcopy(self.new_layer)
+            self.teacher_projector = copy.deepcopy(self.projector)
+        
+            # used as references for momentum averaging
+            self.online = nn.ModuleList([self.encoder, self.new_layer, self.projector]) # encoder, projector 
+            self.teacher = nn.ModuleList([self.teacher_encoder, self.teacher_new_layer, self.teacher_projector]) # encoder, projector
+        
             for p in self.teacher.parameters():
                 p.requires_grad = False
 
+        # if self.asym: # include teacher, predictor in student
+        #     # 2-layer predictor
+        #     self.predictor = nn.Sequential(nn.Linear(dim, pred_dim, bias=False),
+        #                                     nn.BatchNorm1d(pred_dim),
+        #                                     nn.ReLU(inplace=True), # hidden layer
+        #                                     nn.Linear(pred_dim, dim)) # output layer
+    
+        #     self.teacher = copy.deepcopy(self.online) # encoder > new layer > projector
+        #     for p in self.teacher.parameters():
+        #         p.requires_grad = False
+
         # during evaluations, create a new copy of resnet, init final fc and freeze all others. my guess is that you then just load state for all frozen resnet50/base encoder layers
+
+    def to(self, device):
+        """Ensures all submodules are moved to the specified device"""
+        super().to(device)
+        if self.asym:
+            self.online.to(device)
+            self.teacher.to(device)
+            self.predictor.to(device)
+        return self
 
 
     def forward(self, x1, x2):
@@ -292,12 +354,19 @@ class SpectralMEC(nn.Module):
             if symmetric:
                 z1, z2: outputs of online network on augmentations x1, x2
         """
+        print(f"x1 device: {x1.device}")
+        print(f"x2 device: {x2.device}")
+        # Continue with rest of forward pass...
+
         if self.asym:
-            z1, z2 = self.predictor(self.online(x1)), self.predictor(self.online(x2)) # NxC
-    
+            z1 = F.normalize(self.encoder(x1), p=2, dim=1)
+            z2 = F.normalize(self.encoder(x2), p=2, dim=1)
+            z1 = self.predictor(self.projector(self.new_layer(z1)))
+            z2 = self.predictor(self.projector(self.new_layer(z2)))
+
             with torch.no_grad():
-                p1 = self.teacher(x1) 
-                p2 = self.teacher(x2)
+                p1 = self.teacher_projector(self.new_layer(F.normalize(self.teacher_encoder(x1), p=2, dim=1)))
+                p2 = self.teacher_projector(self.new_layer(F.normalize(self.teacher_encoder(x2), p=2, dim=1)))
 
             # symmetrize SCL loss:
             loss1, d_dict1 = D(z1, p2)
@@ -305,7 +374,7 @@ class SpectralMEC(nn.Module):
             loss = 0.5 * (loss1 + loss2)
             return {'loss': loss, 'd_dict': [d_dict1, d_dict2]} #, {'z1':z1, 'z2':z2, 'p1':p1.detach(), 'p2':p2.detach()}
             
-        else: # only use online network
+        else: # only use online network, # TODO: fix later
             z1, z2 = self.online(x1), self.online(x2)
             loss, d_dict = D(z1, z2)
             return {'loss': loss, 'd_dict': [d_dict]} #, {'z1':z1, 'z2':z2}

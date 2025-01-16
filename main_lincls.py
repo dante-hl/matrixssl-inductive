@@ -10,6 +10,7 @@ import random
 import shutil
 import time
 import warnings
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -24,11 +25,13 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
 
+from models.cifar_resnet import cifar_resnet34, cifar_resnet50
+
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
 
-parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
+parser = argparse.ArgumentParser(description='PyTorch ImageNet/CIFAR10 Training')
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
@@ -38,6 +41,10 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                         ' (default: resnet50)')
 parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
+
+parser.add_argument('--dataset', default='CIFAR10',  help='dataset to use')
+parser.add_argument('--save_dir', default='', help='directory to save checkpoints')
+
 parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
@@ -149,6 +156,53 @@ def main_worker(gpu, ngpus_per_node, args):
     print("=> creating model '{}'".format(args.arch))
     model = models.__dict__[args.arch]()
 
+    # block setting requires_grad to False up to creating new model.fc was originally below here
+    ###########
+
+    # load from pre-trained, before DistributedDataParallel constructor
+    if args.pretrained: # override args.arch and args.dim with values found in checkpoint instead
+        if os.path.isfile(args.pretrained):
+            print("=> loading checkpoint '{}'".format(args.pretrained))
+            checkpoint = torch.load(args.pretrained, map_location="cpu")
+            # state_dict = checkpoint
+
+            # rename moco pre-trained keys
+            state_dict = checkpoint['state_dict']
+            args.arch = checkpoint['arch'] # override args.arch
+            args.dim = checkpoint['dim'] # override args.dim
+            print(f'Arch: {args.arch}, dim: {args.dim}')
+
+            if args.dataset == 'ImageNet':
+                model = models.__dict__[args.arch]
+            elif args.dataset == 'CIFAR10':
+                if args.arch == 'resnet34':
+                    model = cifar_resnet34(num_classes=args.dim)
+                elif args.arch == 'resnet50':
+                    model = cifar_resnet50(num_classes=args.dim)
+                else:
+                    raise Exception(f'architecture {args.arch} not supported for cifar10')
+            for k in list(state_dict.keys()):
+                # retain only encoder up to before the embedding layer
+                if k.startswith('module.encoder') and not k.startswith('module.encoder.fc'):
+                    # remove prefix
+                    state_dict[k[len("module.encoder."):]] = state_dict[k]
+                # delete renamed or unused k
+                del state_dict[k]
+
+            print(f'Model type: {type(model)}')
+
+            args.start_epoch = 0
+            msg = model.load_state_dict(state_dict, strict=False)
+            print(msg)
+            # assert set(msg.missing_keys) == {"fc.weight", "fc.bias"}
+
+            if not args.save_dir: # if using checkpoint and save_dir not specified, use directory of checkpoint
+                args.save_dir = str(Path(args.pretrained).parents[1]) # go up two directories
+
+            print("=> loaded pre-trained model '{}'".format(args.pretrained))
+        else:
+            print("=> no checkpoint found at '{}'".format(args.pretrained))
+
     # freeze all layers but the last fc
     for name, param in model.named_parameters():
         if name not in ['fc.weight', 'fc.bias']:
@@ -158,33 +212,7 @@ def main_worker(gpu, ngpus_per_node, args):
     model.fc.bias.data.zero_()
     # normalize the linear classifier input following MAE to ease the process of lr search for different variants
     # similar results can be obtained without this bn layer by tuning the lr
-    model.fc = torch.nn.Sequential(torch.nn.BatchNorm1d(model.fc.in_features, affine=False, eps=1e-6), model.fc)
-
-    # load from pre-trained, before DistributedDataParallel constructor
-    if args.pretrained:
-        if os.path.isfile(args.pretrained):
-            print("=> loading checkpoint '{}'".format(args.pretrained))
-            checkpoint = torch.load(args.pretrained, map_location="cpu")
-            # state_dict = checkpoint
-
-            # rename moco pre-trained keys
-            state_dict = checkpoint['state_dict']
-            for k in list(state_dict.keys()):
-                # retain only encoder up to before the embedding layer
-                if k.startswith('module.encoder') and not k.startswith('module.encoder.fc'):
-                    # remove prefix
-                    state_dict[k[len("module.encoder."):]] = state_dict[k]
-                # delete renamed or unused k
-                del state_dict[k]
-
-            args.start_epoch = 0
-            msg = model.load_state_dict(state_dict, strict=False)
-            print(msg)
-            # assert set(msg.missing_keys) == {"fc.weight", "fc.bias"}
-
-            print("=> loaded pre-trained model '{}'".format(args.pretrained))
-        else:
-            print("=> no checkpoint found at '{}'".format(args.pretrained))
+    # model.fc = torch.nn.Sequential(torch.nn.BatchNorm1d(model.fc.in_features, affine=False, eps=1e-6), model.fc)
 
     # infer learning rate before changing batch size
     init_lr = args.lr * args.batch_size / 256
@@ -258,21 +286,54 @@ def main_worker(gpu, ngpus_per_node, args):
 
     cudnn.benchmark = True
 
-    # Data loading code
-    traindir = os.path.join(args.data, 'train')
-    valdir = os.path.join(args.data, 'val')
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
+    if args.dataset == 'ImageNet':
+        traindir = os.path.join(args.data, 'train')
+        valdir = os.path.join(args.data, 'val')
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])
 
-    train_dataset = datasets.ImageFolder(
-        traindir,
-        transforms.Compose([
-            transforms.RandomResizedCrop(224),
-            transforms.RandomHorizontalFlip(),
+        train_dataset = datasets.ImageFolder(
+            traindir,
+            transforms.Compose([
+                transforms.RandomResizedCrop(224),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                normalize,
+            ])
+        )
+        
+        val_dataset = datasets.ImageFolder(valdir, transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
             transforms.ToTensor(),
             normalize,
-        ]))
+        ])
+    )
 
+    elif args.dataset == 'CIFAR10':
+        normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
+                              std=[0.2470, 0.2435, 0.2616])
+        
+        train_dataset = datasets.CIFAR10(
+            args.data, train=True,
+            transform=transforms.Compose([
+                transforms.RandomCrop(32, padding=4),  # Crop with padding instead of RandomResizedCrop
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                normalize,
+                ])
+        )
+
+        val_dataset = datasets.CIFAR10(
+            args.data, train=False,
+            transform=transforms.Compose([
+                transforms.ToTensor(),
+                normalize,
+                ])
+        )
+    else:
+        raise NotImplementedError
+    
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
@@ -281,16 +342,9 @@ def main_worker(gpu, ngpus_per_node, args):
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler)
-
-    val_loader = torch.utils.data.DataLoader(
-        datasets.ImageFolder(valdir, transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            normalize,
-        ])),
-        batch_size=256, shuffle=False,
-        num_workers=args.workers, pin_memory=True)
+    
+    val_loader = torch.utils.data.DataLoader(val_dataset,
+        batch_size=256, shuffle=False, num_workers=args.workers, pin_memory=True)
 
     if args.evaluate:
         validate(val_loader, model, criterion, args)
@@ -313,13 +367,19 @@ def main_worker(gpu, ngpus_per_node, args):
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
-            save_checkpoint({
+            print(f'Architecture saved is {args.arch}, is best is {is_best}')
+            save_checkpoint(
+                {
                 'epoch': epoch + 1,
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
-            }, is_best)
+                'dim' : args.dim
+                }, 
+                is_best,
+                save_dir=args.save_dir,
+                filename='checkpoint.pth.tar')
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
@@ -419,10 +479,18 @@ def validate(val_loader, model, criterion, args):
     return top1.avg
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    torch.save(state, filename)
+def save_checkpoint(state, is_best, save_dir='', filename='checkpoint.pth.tar'):
+    """
+    creates 'linear' subdirectory below save_dir, to distinguish from outputs of pretrain.sh
+    """
+    exact_dir = os.path.join(save_dir, 'linear')
+    os.makedirs(exact_dir, exist_ok=True)
+    checkpoint_path = os.path.join(exact_dir, filename)
+    torch.save(state, checkpoint_path)
     if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
+        model_best_path = os.path.join(exact_dir, 'model_best.pth.tar')
+        shutil.copyfile(checkpoint_path, model_best_path)
+
 
 
 def sanity_check(state_dict, pretrained_weights):

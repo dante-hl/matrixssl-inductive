@@ -63,8 +63,9 @@ def mean_norm_diff_loss(z1, z2):
 
     z1, z2: batch of B embeddings of shape (B, d) (???)
     """
+    device = z1.device
     d = z1.shape[1]
-    J_d = centering_matrix(d).detach()
+    J_d = centering_matrix(d).detach().to(device)
     z1 = z1 @ J_d
     z2 = z2 @ J_d
     z1_outer = z1.unsqueeze(2) @ z1.unsqueeze(1) # unsqueeze and batch multiply for outer prods

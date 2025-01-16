@@ -33,8 +33,8 @@ import numpy as np
 
 from models.matrixssl import centering_matrix
 from models.mec import MEC, SpectralMEC
+from models.cifar_resnet import cifar_resnet34, cifar_resnet50
 import data.augments
-
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -48,7 +48,7 @@ parser = argparse.ArgumentParser(description='PyTorch CIFAR Training')
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('--dataset', default='CIFAR10', help='dataset')
-parser.add_argument('--save_dir', default='./', type=str, help='save dir')
+parser.add_argument('--save_dir', default='', type=str, help='save dir')
 parser.add_argument('--project_name', default='project_name', type=str, help='wandb project name')
 parser.add_argument('--run_name', default='run_name', type=str, help='wandb run name')
 parser.add_argument('--wandb_logging', choices=['none', 'master', 'all'], default='none', help="wandb logging, if using wandb at all")
@@ -110,7 +110,7 @@ parser.add_argument('--correlation', default=True, type=bool,
                     help='use correlation mce or not')
 parser.add_argument('--logE', default=False, type=bool,
                     help='use logE or not')
-parser.add_argument('--pred-dim', default=512, type=int,
+parser.add_argument('--pred_dim', default=512, type=int,
                     help='hidden dimension of the predictor (default: 512)')
 parser.add_argument('--m', default=1024, type=float, metavar='M',
                     help='the total batch size across all GPUs')
@@ -203,18 +203,25 @@ def main_worker(gpu, ngpus_per_node, args):
                    name=f"{args.run_name}_gpu{gpu}" if args.wandb_logging == 'all' else args.run_name
         )
 
+    if args.dataset == 'ImageNet':
+        base = models.__dict__[args.arch]
+    elif args.dataset == 'CIFAR10':
+        if args.arch == 'resnet34':
+            base = cifar_resnet34
+        elif args.arch == 'resnet50':
+            base = cifar_resnet50
+        else:
+            raise Exception(f'architecture {args.arch} not supported for cifar10')
+
     # create model
     print("=> creating model '{}'".format(args.arch))
     if args.model == 'mec':
         model = MEC(
-            models.__dict__[args.arch],
-            args.dim, args.pred_dim, loss_type=args.loss_type
+            base, args.dim, args.pred_dim, loss_type=args.loss_type
             )
     elif args.model == 'spectralmec':
         model = SpectralMEC(
-            models.__dict__[args.arch],
-            args.dim, args.pred_dim, 
-            layer_type=args.layer_type, asym=args.asym
+            base, args.dim, args.pred_dim, layer_type=args.layer_type, asym=args.asym, momentum=args.teacher_momentum
         )
     else:
         raise Exception(f'invalid model argument, received {args.model}')
@@ -279,44 +286,70 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
-    traindir = os.path.join(args.data, 'train')
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-
-    # follow MoCov3's augmentation recipe
-    augmentation1 = [
-        transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
-        transforms.RandomApply([
-            transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
-        ], p=0.8),
-        transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([data.augments.GaussianBlur([.1, 2.])], p=1.0),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize
-    ]
-
-    augmentation2 = [
-        transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
-        transforms.RandomApply([
-            transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
-        ], p=0.8),
-        transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([data.augments.GaussianBlur([.1, 2.])], p=0.1),
-        transforms.RandomApply([data.augments.Solarize()], p=0.2),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize
-    ]
-
     if args.dataset == 'ImageNet':
+        traindir = os.path.join(args.data, 'train')
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])
+        
+        # follow MoCov3's augmentation recipe
+        augmentation1 = [
+            transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
+            transforms.RandomApply([
+                transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
+            ], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([data.augments.GaussianBlur([.1, 2.])], p=1.0),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize
+        ]
+
+        augmentation2 = [
+            transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
+            transforms.RandomApply([
+                transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
+            ], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([data.augments.GaussianBlur([.1, 2.])], p=0.1),
+            transforms.RandomApply([data.augments.Solarize()], p=0.2),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize
+        ]
+
         train_dataset = datasets.ImageFolder(
             traindir,
-            data.augments.TwoCropsTransform(transforms.Compose(augmentation1),
-                                      transforms.Compose(augmentation2)))
+            data.augments.TwoCropsTransform(transforms.Compose(augmentation1), transforms.Compose(augmentation2))
+            )
+        
     elif args.dataset == 'CIFAR10':
-        train_dataset = datasets.CIFAR10(args.data, train=True, transform=data.augments.TwoCropsTransform(transforms.Compose(augmentation1),
-                                      transforms.Compose(augmentation2)), download=True)
+        normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
+                              std=[0.2470, 0.2435, 0.2616])
+        
+        cifar_augments = [
+                transforms.RandomResizedCrop(size=32, scale=(0.2, 1.0)),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomApply([
+                    transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
+                ], p=0.8),
+                transforms.RandomGrayscale(p=0.2),
+                transforms.RandomApply([
+                    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))
+                ], p=0.5),
+                transforms.RandomSolarize(threshold=128, p=0.1),
+                transforms.ToTensor(),
+            ]
+        # cifar_augments = [
+        #     transforms.RandomCrop(32, padding=4),
+        #     transforms.RandomHorizontalFlip(),
+        #     transforms.ToTensor(),
+        #     normalize
+        # ]
+
+        train_dataset = datasets.CIFAR10(
+            args.data, train=True, 
+            transform=data.augments.TwoCropsTransform(transforms.Compose(cifar_augments), transforms.Compose(cifar_augments)), download=True
+            )
     else:
         raise NotImplementedError
 
@@ -332,7 +365,7 @@ def main_worker(gpu, ngpus_per_node, args):
     momentum_schedule = cosine_scheduler(args.teacher_momentum, 1,
                                          args.epochs, len(train_loader))
 
-    lr_schedule = cosine_scheduler(init_lr, 0,
+    lr_schedule = cosine_scheduler(init_lr, 1e-6, # changed from 0
                                    args.epochs, len(train_loader), warmup_epochs=10)
 
     # following the notations of the paper
@@ -343,6 +376,32 @@ def main_worker(gpu, ngpus_per_node, args):
     lamda = 1 / (args.m * eps_d)
     # warm up of lamda (lamda_inv) to ensure the convergence of Taylor expansion (Eqn.2)
     lamda_schedule = lamda_scheduler(8/lamda, 1/lamda, args.epochs, len(train_loader), warmup_epochs=10)
+
+    # # Assuming your model is called 'model'
+    # for name, param in model.module.projector.named_parameters():
+    #     print(f"Parameter {name}: device = {param.device}")
+        
+    # # You can also check the device of each submodule
+    # for i, module in enumerate(model.module.projector):
+    #     print(f"\nModule {i}: {type(module).__name__}")
+    #     for name, param in module.named_parameters():
+    #         print(f"  Parameter {name}: device = {param.device}")
+
+    # # Check the new_layer parameters
+    # print("\nNew Layer:")
+    # for name, param in model.module.new_layer.named_parameters():
+    #     print(f"Parameter {name}: device = {param.device}")
+
+    # # If using asymmetric setup, check teacher network
+    # if model.module.asym:
+    #     print("\nTeacher Network:")
+    #     for name, param in model.module.teacher.named_parameters():
+    #         print(f"Parameter {name}: device = {param.device}")
+        
+    #     print("\nPredictor:")
+    #     for name, param in model.module.predictor.named_parameters():
+    #         print(f"Parameter {name}: device = {param.device}")
+
 
     for epoch in range(args.start_epoch, args.epochs):
         print(f'Epoch {epoch}')
@@ -355,19 +414,25 @@ def main_worker(gpu, ngpus_per_node, args):
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
             if epoch % 50 == 49:
-                os.makedirs(args.save_dir, exist_ok=True)
-                save_checkpoint({
+                save_checkpoint(
+                    {
                     'epoch': epoch + 1,
                     'arch': args.arch,
                     'state_dict': model.state_dict(),
                     'optimizer' : optimizer.state_dict(),
-                }, is_best=False, filename=args.save_dir + '/checkpoint_{:04d}.pth.tar'.format(epoch))
+                    'dim' : args.dim
+                    }, 
+                    is_best=False,
+                    save_dir=args.save_dir,
+                    filename='checkpoint_{:04d}.pth.tar'.format(epoch))
 
 
 def train(train_loader, model, optimizer, epoch, lr_schedule, momentum_schedule, lamda_schedule, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4f')
+    align_losses = AverageMeter('Align Loss', ':.4f')
+    unif_losses = AverageMeter('Unif Loss', ':.4f')
     # mec = AverageMeter('MEC', ':6.3f')
     # mce = AverageMeter('MCE', ':6.3f')
     progress = ProgressMeter(
@@ -417,8 +482,12 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, momentum_schedule,
 
         # print('After forward')
         # print_memory_stats()  #####
-
         losses.update(loss.detach().item(), images[0].size(0))
+        if args.model == 'mec':
+            alignment_loss = loss_dict['alignment_loss']
+            unif_loss = loss_dict['uniformity_loss']
+            align_losses.update(alignment_loss.detach().item(), images[0].size(0))
+            unif_losses.update(unif_loss.detach().item(), images[0].size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -429,7 +498,9 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, momentum_schedule,
         # print_memory_stats()  #####
 
         # momentum averaging for mssl with asymmetric networks
-        if getattr(model, "asym", False):
+        if getattr(model.module, "asym", False):
+            # if i < 10:
+                 # print('Momentum average is being done!')
             with torch.no_grad():
                 # terminates at end of shortest iterator, excludes predictor weights
                 # need to ensure backbone and projector networks the same  
@@ -445,7 +516,17 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, momentum_schedule,
                 progress.display(i)
 
     if SHOULD_LOG:
-        wandb.log({"loss":losses.avg})
+        if args.model == 'mec':
+            wandb.log({
+                    "loss": losses.avg,
+                    "alignment_loss": align_losses.avg,
+                    "uniformity_loss": unif_losses.avg,
+                })
+        else:
+            wandb.log({
+                    "loss": losses.avg,
+            })
+
 
 
 # Taylor expansion
@@ -514,10 +595,17 @@ def loss_func(p, z, lamda_inv, order=4):
     return trace
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    torch.save(state, filename)
+def save_checkpoint(state, is_best, save_dir='', filename='checkpoint.pth.tar'):
+    """
+    creates 'pretrain' subdirectory below save_dir, to distinguish from outputs of linear.sh
+    """
+    exact_dir = os.path.join(save_dir, 'pretrain')
+    os.makedirs(exact_dir, exist_ok=True)
+    checkpoint_path = os.path.join(exact_dir, filename)
+    torch.save(state, checkpoint_path)
     if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
+        model_best_path = os.path.join(exact_dir, 'model_best.pth.tar')
+        shutil.copyfile(filename, model_best_path)
 
 
 class AverageMeter(object):
